@@ -1,0 +1,53 @@
+# ==========================================
+# Godot 4+ 项目通用 ignore
+# ==========================================
+
+# Godot 编辑器缓存/导入产物
+.godot/
+.import/
+
+# Android 导出
+android/
+.android/
+
+# Mono / C# 相关(本项目不用,留着防万一)
+.mono/
+mono_crash.*.json
+data_*/
+
+# 系统垃圾
+.directory
+*~
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================================
+# 本地敏感配置 — 真实 API Key 放这里, 不入库
+# ==========================================
+config.local.json
+config.local.*.json
+*.local.json
+
+# ==========================================
+# 项目特定
+# ==========================================
+
+# Godot 引擎二进制 (170MB, 自己装/用 tools/godot/ 软链)
+tools/godot/
+
+# 烘焙输出: 全部入库 (用户确认, clone 后能直接跑 demo)
+# saved_logs/
+
+# 视频导出产物
+exports/*
+!exports/.gitkeep
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env

@@ -1,0 +1,58 @@
+{
+  "_comment": "Life Log RPG - 配置文件。真实 API Key 已从本文件剥离, 移到 gitignored 的 config.local.json。",
+  "_rules": [
+    "1. 任何 .gd / .cs 源码严禁硬编码 Key, 只读本文件或 config.local.json",
+    "2. 真实生产环境应通过环境变量 LIFELOG_AMAP_KEY / LIFELOG_MINIMAX_KEY 覆盖",
+    "3. 本文件可入库 (key 是占位符); 真实 key 放 config.local.json (gitignored)",
+    "4. Demo 阶段明文保存; Phase 5 切到 .dat 加密 + 鉴权"
+  ],
+  "_security_warning": "⚠️ 这两个 key 之前明文保存在本文件并准备推公开 GitHub。强烈建议立刻去控制台 rotate:\n  - 高德: https://lbs.amap.com/dev/key/app\n  - MiniMax: https://api.minimaxi.com\nrotate 后, 把新 key 填到 config.local.json。旧 key 即使本文件已脱敏, 仍可能在本机 / 之前的会话 / 第三方监控里被记录。",
+
+  "amap": {
+    "api_key": "YOUR_AMAP_API_KEY_HERE",
+    "api_key_filled": false,
+    "_fill_in": "把真实 key 填到 config.local.json 的 amap.api_key 字段",
+    "base_url": "https://restapi.amap.com/v3",
+    "timeout_sec": 10
+  },
+
+  "minimax": {
+    "api_key": "YOUR_MINIMAX_API_KEY_HERE",
+    "group_id": "",
+    "_group_id_hint": "MiniMax API v1/text/chatcompletion_v2 需要 group_id 作为 query 参数, 在控制台 '用户管理' -> 'group_id' 查看。若为空, 调用会 401/403。",
+    "api_key_filled": false,
+    "_fill_in": "把真实 key 填到 config.local.json 的 minimax.api_key 字段",
+    "base_url": "https://api.minimaxi.com/v1",
+    "text_model": "MiniMax-Text-01",
+    "vision_model": "abab6.5s-chat",
+    "timeout_sec": 30,
+    "_vision_model_note": "MiniMax 文档说视觉模型是 MiniMax-VL-01, 但实际不存在。abab6.5s-chat 是唯一实测可用的 vision 模型。来源: agent memory 2026-07-19"
+  },
+
+  "bake": {
+    "output_dir": "F:/LifeLogRPG_Project/saved_logs",
+    "tile_size_px": 16,
+    "viewport_grid_w": 80,
+    "viewport_grid_h": 60,
+    "default_city": "北京",
+    "default_walk_speed_px_per_sec": 60.0,
+    "default_bike_speed_px_per_sec": 180.0,
+    "default_car_speed_px_per_sec": 480.0,
+    "weather_seed": 42
+  },
+
+  "playback": {
+    "default_speed": 1.0,
+    "min_speed": 0.25,
+    "max_speed": 8.0,
+    "auto_loop": true,
+    "show_nametag": true
+  },
+
+  "export": {
+    "video_default_duration_sec": 30,
+    "video_fps": 30,
+    "video_resolution": [720, 1280],
+    "ffmpeg_path": "ffmpeg"
+  }
+}
