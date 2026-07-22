@@ -10,6 +10,8 @@ class_name LogLoader
 #   get_map() -> Dictionary
 #   get_meta() -> Dictionary
 #   get_total_duration() -> float
+#   get_pois() -> Array                 # P0.3
+#   get_transit_markers() -> Array      # P0.4
 #
 # 容错策略:
 #   - 缺字段: 用默认值, 打印 warning
@@ -23,6 +25,10 @@ var _waypoints: Array = []
 var _dialogs: Array = []
 var _map: Dictionary = {}
 var _meta: Dictionary = {}
+var _pois: Array = []
+var _transit_markers: Array = []   # P0.4
+var _building_heights: Array = []   # P1.2 (跟 grid 同步, 0=无建筑)
+var _interiors: Array = []          # P1.3 (室内 slot: 咖啡厅/办公室/etc.)
 
 
 func load(path: String) -> Dictionary:
@@ -32,6 +38,10 @@ func load(path: String) -> Dictionary:
     _dialogs = []
     _map = {}
     _meta = {}
+    _pois = []
+    _transit_markers = []
+    _building_heights = []
+    _interiors = []
 
     if not FileAccess.file_exists(path):
         push_error("LogLoader: file not found: " + path)
@@ -63,6 +73,12 @@ func _validate(payload: Dictionary) -> void:
     _map = payload.get("map", {})
     _waypoints = payload.get("path", [])
     _dialogs = payload.get("dialogs", [])
+    _pois = payload.get("pois", [])
+    _transit_markers = payload.get("transit_markers", [])
+    # P1.2: building_heights 在 map 子层, 不是顶层
+    _building_heights = _map.get("building_heights", [])
+    # P1.3: interiors 顶层字段
+    _interiors = payload.get("interiors", [])
 
     # map 字段
     if not _map.has("tile_size"):
@@ -98,6 +114,34 @@ func _validate(payload: Dictionary) -> void:
         if not d.has("text"):
             d["text"] = ""
 
+    # P0.3 POI 校验
+    for i in range(_pois.size()):
+        var poi: Dictionary = _pois[i]
+        for k in ["name", "type", "category", "address"]:
+            if not poi.has(k):
+                poi[k] = ""
+        for k in ["lng", "lat", "distance"]:
+            if not poi.has(k):
+                poi[k] = 0
+        for k in ["grid_x", "grid_y"]:
+            if not poi.has(k):
+                poi[k] = 0
+
+    # P0.4 TransitMarker 校验
+    for i in range(_transit_markers.size()):
+        var tm: Dictionary = _transit_markers[i]
+        if not tm.has("name"):
+            tm["name"] = ""
+        if not tm.has("transport"):
+            tm["transport"] = "transit"
+        for k in ["start_lng", "start_lat", "end_lng", "end_lat",
+                  "distance_m", "duration_sec"]:
+            if not tm.has(k):
+                tm[k] = 0.0
+        for k in ["start_grid_x", "start_grid_y", "end_grid_x", "end_grid_y"]:
+            if not tm.has(k):
+                tm[k] = -1   # -1 表示超出 grid, Godot 端决定是否画边缘 pin
+
 
 # ----- 访问器 -----
 
@@ -113,6 +157,32 @@ func get_map() -> Dictionary:
 func get_log_meta() -> Dictionary:
     """返回日志的 meta 段 (注意: 跟 Node.get_meta() 命名冲突, 显式加 log_ 前缀)"""
     return _meta
+
+func get_pois() -> Array:
+    """返回 POI 列表 (P0.3 新增)"""
+    return _pois
+
+func get_transit_markers() -> Array:
+    """返回 TransitMarker 列表 (P0.4 新增)
+    每条: {name, transport, start_lng, start_lat, end_lng, end_lat,
+           start_grid_x, start_grid_y, end_grid_x, end_grid_y,
+           distance_m, duration_sec}
+    """
+    return _transit_markers
+
+func get_building_heights() -> Array:
+    """返回 building_heights 二维数组 (P1.2 新增)
+    building_heights[y][x] = 0 (无建筑) 或 N (N 层)
+    跟 grid 同步大小
+    """
+    return _building_heights
+
+func get_interiors() -> Array:
+    """返回 interior slot 列表 (P1.3 新增)
+    每条: {name, category, raw_tag, lng, lat, grid_x, grid_y, has_name}
+    画在对应 building 中心 cell 上, 用 interior_<category> icon
+    """
+    return _interiors
 
 func get_tile_size() -> int:
     return int(_map.get("tile_size", 16))

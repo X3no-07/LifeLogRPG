@@ -19,7 +19,8 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
         print(f"[config] WARN: {path} 不存在, 用默认空配置")
         return _default_config()
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # 用 utf-8-sig 兼容 BOM (PowerShell Set-Content 默认加 BOM)
+        with open(path, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     except json.JSONDecodeError as e:
         print(f"[config] ERROR: 解析 {path} 失败: {e}")

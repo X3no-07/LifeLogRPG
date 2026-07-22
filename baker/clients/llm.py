@@ -71,20 +71,24 @@ class LLMClient:
         return None
 
     def extract_places(self, text: str) -> List[str]:
-        """从中文生活日志中提取地点列表 (NER)"""
+        """从中文生活日志中提取地点列表 (NER)
+        改进版 (P0.x):
+        - 1-shot example 帮 LLM 理解格式
+        - max_tokens 提到 1000 防止 CoT 截断
+        - temperature 0 让输出确定
+        - 明确"不输出解释"
+        """
         if not self.enabled():
             return []
         prompt = (
-            "你是地点 NER 助手。从下面中文日志提取所有真实地点(商场/餐厅/地铁站/公园/景点/小区/写字楼/地铁线)。\n"
-            "严格要求(否则算失败):\n"
-            "- 严格只输出 JSON 数组, 第一个字符必须是 [, 最后一个必须是 ]\n"
-            "- 不要任何解释、分析、前缀、后缀、markdown 包裹\n"
-            "- 按出现顺序, 每个地点 2-12 字, 去掉动作词(走/到/去/在/经过/买/吃/看/坐)\n"
-            "- 没有地点就输出 []\n"
-            f"\n日志: {text}\n\n"
+            "从中文日志提取地点, 输出 JSON 数组, 无其他文字。\n\n"
+            "例:\n"
+            "日志: 我从天安门走到王府井, 然后坐地铁去国贸\n"
+            "输出: [\"天安门\", \"王府井\", \"国贸\"]\n\n"
+            "日志: " + text + "\n"
             "输出:"
         )
-        content = self.chat(prompt, max_tokens=500, temperature=0.0)
+        content = self.chat(prompt, max_tokens=1000, temperature=0.0)
         if not content:
             return []
         result = _parse_json_lenient(content, expect="array")

@@ -10,6 +10,21 @@ extends Node2D
 #
 # 数据流: JSON -> LogLoader -> modules -> UI
 # 模块间通信: signal + 共享引用 (no global state)
+#
+# 注: 用 preload 代替 class_name 全局注册 (Godot headless 模式不写 class cache,
+#     单独 --import 不一定触发, preload 是稳定方案)
+
+const LogLoaderClass = preload("res://scripts/loader.gd")
+const WorldBuilderClass = preload("res://scripts/world.gd")
+const PlayerClass = preload("res://scripts/player.gd")
+const UISystemClass = preload("res://scripts/ui.gd")
+const TransportSystemClass = preload("res://scripts/transport.gd")
+const NpcSystemClass = preload("res://scripts/npc.gd")
+const PlaybackControllerClass = preload("res://scripts/playback.gd")
+const BakeLoadingSceneClass = preload("res://scripts/loading.gd")
+const AudioSystemClass = preload("res://scripts/audio.gd")
+const WeatherSystemClass = preload("res://scripts/weather.gd")
+const AvatarBuilderClass = preload("res://scripts/avatar_builder.gd")
 
 const CONFIG_PATH := "res://config.json"
 const DEFAULT_LOG_PATH := "res://saved_logs/log_001.json"
@@ -18,14 +33,16 @@ const DEFAULT_LOG_PATH := "res://saved_logs/log_001.json"
 var config: Dictionary = {}
 var log_path: String = DEFAULT_LOG_PATH
 
-# 模块
-var loader: LogLoader
-var world: WorldBuilder
-var player: Player
-var ui_sys: UISystem
-var transport: TransportSystem
-var npc_sys: NpcSystem
-var playback: PlaybackController
+# 模块 (preload 拿到 Script, 不写类型注解因为 GDScript 静态推断有限)
+var loader
+var world
+var player
+var ui_sys
+var transport
+var npc_sys
+var playback
+var audio
+var weather
 var camera: Camera2D
 
 # 数据 (来自 loader)
@@ -39,8 +56,52 @@ func _ready() -> void:
     _load_log()
     _build_modules()
     _wire_signals()
-    _start()
+    # 启动序列: 捏脸 → loading → 播放
+    _play_avatar_builder_then_loading()
     print("[LifeLogRPG] Ready. Log: ", log_path)
+
+
+func _play_avatar_builder_then_loading() -> void:
+    var ab = AvatarBuilderClass.new()
+    add_child(ab)
+    # 如果有已保存的 avatar, 直接用; 否则显示捏脸 UI
+    var saved = AvatarBuilderClass.load_avatar()
+    # 检查是否需要展示捏脸: 如果有 --force-avatar 命令行参数 或 saved 是空
+    var force := false
+    for arg in OS.get_cmdline_args():
+        if arg == "--force-avatar" or arg == "--avatar":
+            force = true
+            break
+    if saved.is_empty() or force:
+        ab.confirmed.connect(_on_avatar_confirmed)
+        ab.show_builder({})
+    else:
+        # 已有 avatar, 跳过捏脸直接 loading
+        _apply_avatar_to_player(saved)
+        _play_loading()
+
+
+func _on_avatar_confirmed(avatar: Dictionary) -> void:
+    _apply_avatar_to_player(avatar)
+    _play_loading()
+
+
+func _apply_avatar_to_player(avatar: Dictionary) -> void:
+    if player and player.has_method("apply_avatar"):
+        player.apply_avatar(avatar)
+
+
+func _play_loading() -> void:
+    var loading = BakeLoadingSceneClass.new()
+    add_child(loading)
+    loading.finished.connect(_on_loading_finished)
+    loading.play()
+
+
+func _on_loading_finished() -> void:
+    _start()
+    if audio:
+        audio.play_music()
 
 
 # =====================================================================
@@ -72,7 +133,7 @@ func _resolve_log_path() -> void:
 
 
 func _load_log() -> void:
-    loader = LogLoader.new()
+    loader = LogLoaderClass.new()
     if loader.load(log_path).is_empty():
         push_warning("log 加载失败, 使用空数据")
     waypoints = loader.get_waypoints()
@@ -83,13 +144,13 @@ func _build_modules() -> void:
     var tile_size: int = loader.get_tile_size()
 
     # 地图
-    world = WorldBuilder.new()
+    world = WorldBuilderClass.new()
     world.name = "World"
     add_child(world)
     world.build(loader)
 
     # 玩家
-    player = Player.new()
+    player = PlayerClass.new()
     player.name = "Player"
     world.add_child(player)
     player.build(tile_size)
@@ -109,25 +170,25 @@ func _build_modules() -> void:
         camera.position = player.position
 
     # UI (创建 ui_layer 后才能给 TransportSystem 用)
-    ui_sys = UISystem.new()
+    ui_sys = UISystemClass.new()
     add_child(ui_sys)
     ui_sys.setup(self)
     ui_sys.progress_bar.max_value = max(loader.get_total_duration(), 1.0)
 
     # Transport (需要 ui_layer 放 overlay)
-    transport = TransportSystem.new()
+    transport = TransportSystemClass.new()
     add_child(transport)
     transport.setup(ui_sys.ui_layer, player)
     if waypoints.size() > 0:
         transport.sync_current(String(waypoints[0].get("transport", "walking")))
 
     # NPC
-    npc_sys = NpcSystem.new()
+    npc_sys = NpcSystemClass.new()
     add_child(npc_sys)
     npc_sys.setup(world.npc_layer, tile_size)
 
     # 播放控制
-    playback = PlaybackController.new()
+    playback = PlaybackControllerClass.new()
     add_child(playback)
     var pb_cfg: Dictionary = config.get("playback", {})
     playback.setup(
@@ -137,6 +198,19 @@ func _build_modules() -> void:
         float(pb_cfg.get("default_speed", 1.0)),
     )
 
+    # 8-Bit BGM (程序化生成, 无需外部素材)
+    audio = AudioSystemClass.new()
+    add_child(audio)
+    audio.setup()
+
+    # 天气粒子 (根据 meta.weather, 必须 add 到 world 跟随相机)
+    var meta: Dictionary = loader.get_log_meta()
+    weather = WeatherSystemClass.new()
+    weather.name = "Weather"
+    world.add_child(weather)
+    weather.setup(loader.get_grid_width(), loader.get_grid_height(),
+                  String(meta.get("weather", "unknown")))
+
 
 func _wire_signals() -> void:
     playback.time_changed.connect(_on_time_changed)
@@ -144,8 +218,11 @@ func _wire_signals() -> void:
 
 func _start() -> void:
     playback.start()
-    var meta := loader.get_log_meta()
-    ui_sys.update_status(meta.get("title", "Log"), meta.get("mood", "calm"))
+    ui_sys.update_status(loader.get_log_meta().get("title", "Log"),
+                         loader.get_log_meta().get("mood", "calm"))
+    # 把天气状态显示到 UI
+    if weather:
+        ui_sys.speed_label.text += "  |  Weather: " + weather.get_current()
 
 
 # =====================================================================
@@ -155,7 +232,7 @@ func _start() -> void:
 func _process(delta: float) -> void:
     if playback == null:
         return
-    var was_in_transition := transport.is_in_transition() if transport else false
+    var was_in_transition: bool = transport.is_in_transition() if transport else false
     if not was_in_transition:
         playback.update(delta)
     _update_player_position()

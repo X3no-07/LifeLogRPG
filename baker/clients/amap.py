@@ -89,6 +89,51 @@ class AmapClient:
             self._log(f"place_text error: {e}")
         return None
 
+    def place_around(self, location: Tuple[float, float], radius: int = 500,
+                     types: Optional[str] = None,
+                     keywords: Optional[str] = None) -> List[Dict[str, Any]]:
+        """POI 周边搜索: 中心点 + 半径米
+        location: (lng, lat) 高德坐标系
+        radius: 米, 默认 500
+        types: 高德 POI 类型码 (逗号分隔), e.g. "050000"=餐饮, "060000"=购物
+        keywords: 关键词, 可选
+
+        返回: [{"name", "location": (lng, lat), "type", "address", "distance"}, ...]
+        """
+        if not self.enabled():
+            return []
+        params: Dict[str, Any] = {
+            "key": self.api_key,
+            "location": f"{location[0]},{location[1]}",
+            "radius": radius,
+            "offset": 20,  # 每次最多 20 个
+            "output": "JSON",
+        }
+        if types:
+            params["types"] = types
+        if keywords:
+            params["keywords"] = keywords
+        try:
+            r = self._requests.get(f"{self.base_url}/place/around", params=params, timeout=self.timeout)
+            data = r.json()
+            if data.get("status") == "1" and data.get("pois"):
+                out: List[Dict[str, Any]] = []
+                for p in data["pois"]:
+                    lng, lat = p["location"].split(",")
+                    out.append({
+                        "name": p.get("name", ""),
+                        "type": p.get("type", ""),
+                        "address": p.get("address", ""),
+                        "location": (float(lng), float(lat)),
+                        "distance": int(p.get("distance", 0)),
+                    })
+                return out
+            else:
+                self._log(f"place_around fail: status={data.get('status')} info={data.get('info')} count={data.get('count')}")
+        except Exception as e:
+            self._log(f"place_around error: {e}")
+        return []
+
     # ------------------------------------------------------------------
     #  Route
     # ------------------------------------------------------------------
@@ -143,6 +188,8 @@ class AmapClient:
                 "polyline": s.get("polyline", ""),
             })
         full_polyline = ";".join(s["polyline"] for s in steps_data)
+        # walking/bicycling 是街道级, 全部当作 walking_polyline
+        # driving 段不算 walking (开车不可能在 grid 上画)
         return {
             "distance": float(path.get("distance", 0)),
             "duration": float(path.get("duration", 0)),
@@ -151,31 +198,61 @@ class AmapClient:
         }
 
     def _parse_transit(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """解析公交/地铁换乘方案
+        返回字段:
+          - distance / duration: 总和
+          - polyline: 全部段拼接 (兼容旧逻辑, 不区分 walking/bus)
+          - walking_polyline: 只拼接 walking 段 (用于自适应切片)
+          - segments: [{mode: "walking"|"bus", polyline, distance, duration}, ...]
+        """
         transits = data.get("route", {}).get("transits", [])
         if not transits:
             return None
         t = transits[0]
         all_pts: List[Point] = []
+        walking_pts: List[Point] = []
         total_dist = 0.0
         total_dur = 0.0
+        seg_list: List[Dict[str, Any]] = []
         for seg in t.get("segments", []):
             if "bus" in seg and seg["bus"].get("buslines"):
                 bl = seg["bus"]["buslines"][0]
-                pts = self._transit_polyline_to_points(bl.get("polyline", ""))
+                poly_str = bl.get("polyline", "")
+                pts = self._transit_polyline_to_points(poly_str)
                 all_pts.extend(pts)
-                total_dist += float(bl.get("distance", 0))
-                total_dur += float(bl.get("duration", 0))
+                dist = float(bl.get("distance", 0))
+                dur = float(bl.get("duration", 0))
+                total_dist += dist
+                total_dur += dur
+                seg_list.append({
+                    "mode": "bus",
+                    "polyline": poly_str,
+                    "distance": dist,
+                    "duration": dur,
+                })
             if "walking" in seg:
-                pts = self._transit_polyline_to_points(seg["walking"].get("polyline", ""))
+                poly_str = seg["walking"].get("polyline", "")
+                pts = self._transit_polyline_to_points(poly_str)
                 all_pts.extend(pts)
-                total_dist += float(seg["walking"].get("distance", 0))
-                total_dur += float(seg["walking"].get("duration", 0))
+                walking_pts.extend(pts)
+                dist = float(seg["walking"].get("distance", 0))
+                dur = float(seg["walking"].get("duration", 0))
+                total_dist += dist
+                total_dur += dur
+                seg_list.append({
+                    "mode": "walking",
+                    "polyline": poly_str,
+                    "distance": dist,
+                    "duration": dur,
+                })
         polyline = ";".join(f"{p[0]},{p[1]}" for p in all_pts)
+        walking_polyline = ";".join(f"{p[0]},{p[1]}" for p in walking_pts)
         return {
             "distance": total_dist,
             "duration": total_dur,
             "polyline": polyline,
-            "steps": [{"instruction": f"公交段 {i}", "polyline": polyline} for i in range(len(all_pts))],
+            "walking_polyline": walking_polyline,
+            "segments": seg_list,
         }
 
     @staticmethod

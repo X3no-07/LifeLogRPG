@@ -15,14 +15,15 @@ const TRANSPORT_ZH: Dictionary = {
     "walking": "走路", "driving": "开车", "transit": "坐地铁", "bicycling": "骑车",
 }
 
-var player: Player
+var player
 var overlay: ColorRect
 var label: Label
 var _current: String = "walking"
 var _in_transition: bool = false
 
 
-func setup(p_ui_layer: CanvasLayer, p_player: Player) -> void:
+func setup(p_ui_layer, p_player) -> void:
+    """p_ui_layer: CanvasLayer, p_player: Player — 类型省略以避免 GDScript 静态推断问题"""
     player = p_player
     overlay = ColorRect.new()
     overlay.color = Color(0, 0, 0, 0)

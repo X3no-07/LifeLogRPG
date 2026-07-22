@@ -4,15 +4,55 @@ class_name Player
 #
 # 公开 API:
 #   build(tile_size) -> void            # 初始化所有 sprite
+#   apply_avatar(avatar: Dictionary) -> void   # 用 avatar 配置重画 walking sprite
 #   switch_to(transport: String)        # 切换可见 sprite, 无 tween (transport.gd 处理淡入淡出)
 #   get_current() -> String             # 返回当前 transport 名
 #   get_eye_node() -> Node              # 朝向指示点 (给 _update_facing_direction 用)
 
 const PALETTE := {"player": Color8(242, 204, 44), "skin": Color8(242, 191, 140)}
 
+# avatar 配方 (跟 avatar_builder.gd 的 OPTIONS 同步)
+# shape parts: [x, y, w, h]  (相对中心, 1px 单位)
+const AVATAR_PARTS := {
+    "hair": [
+        {"id": "spike", "name": "尖发", "color": Color8(50, 30, 20),
+         "parts": [{"x": -5, "y": -10, "w": 10, "h": 3},
+                   {"x": -3, "y": -13, "w": 2, "h": 3},
+                   {"x": 1, "y": -13, "w": 2, "h": 3}]},
+        {"id": "bob", "name": "波波头", "color": Color8(120, 70, 30),
+         "parts": [{"x": -5, "y": -10, "w": 10, "h": 4},
+                   {"x": -7, "y": -6, "w": 2, "h": 4},
+                   {"x": 5, "y": -6, "w": 2, "h": 4}]},
+        {"id": "bald", "name": "光头", "color": Color8(200, 150, 100),
+         "parts": [{"x": -5, "y": -10, "w": 10, "h": 2}]},
+    ],
+    "skin": [
+        {"id": "light", "name": "白皮肤", "color": Color8(245, 215, 175), "parts": []},
+        {"id": "medium", "name": "黄皮肤", "color": Color8(230, 190, 140), "parts": []},
+        {"id": "dark", "name": "深皮肤", "color": Color8(160, 110, 70), "parts": []},
+    ],
+    "shirt": [
+        {"id": "red", "name": "红 T 恤", "color": Color8(220, 60, 60), "parts": [{"x": -5, "y": -2, "w": 10, "h": 5}]},
+        {"id": "blue", "name": "蓝 T 恤", "color": Color8(60, 110, 200), "parts": [{"x": -5, "y": -2, "w": 10, "h": 5}]},
+        {"id": "white", "name": "白衬衫", "color": Color8(245, 245, 245), "parts": [{"x": -5, "y": -2, "w": 10, "h": 5}]},
+    ],
+    "pants": [
+        {"id": "blue", "name": "蓝裤", "color": Color8(50, 80, 150), "parts": [{"x": -5, "y": 3, "w": 10, "h": 5}]},
+        {"id": "black", "name": "黑裤", "color": Color8(40, 40, 50), "parts": [{"x": -5, "y": 3, "w": 10, "h": 5}]},
+    ],
+    "accessory": [
+        {"id": "none", "name": "无", "color": Color.WHITE, "parts": []},
+        {"id": "glasses", "name": "眼镜", "color": Color8(30, 30, 30),
+         "parts": [{"x": -4, "y": -6, "w": 3, "h": 2},
+                   {"x": 1, "y": -6, "w": 3, "h": 2},
+                   {"x": -1, "y": -5, "w": 2, "h": 1}]},
+    ],
+}
+
 var _sprites: Dictionary = {}  # {"walking": Node2D, "driving": ..., "transit": ..., "bicycling": ...}
 var _current: String = "walking"
 var tile_size: int = 16
+var _avatar: Dictionary = {}  # 当前 avatar 配置
 
 
 func build(p_tile_size: int) -> void:
@@ -27,6 +67,50 @@ func build(p_tile_size: int) -> void:
         add_child(sp)
     _sprites["walking"].visible = true
     _current = "walking"
+
+
+func apply_avatar(avatar: Dictionary) -> void:
+    """用 avatar 配置重画 walking sprite (其它 sprite 暂不重画, P2 阶段)
+    avatar: {hair, skin, shirt, pants, accessory}
+    """
+    _avatar = avatar
+    if not _sprites.has("walking"):
+        return
+    var walk: Node2D = _sprites["walking"]
+    # 清理现有 (保留 Eye 因为朝向用)
+    for child in walk.get_children():
+        if child.name == "Eye":
+            continue
+        child.queue_free()
+    # 顺序: pants -> skin -> shirt -> hair -> accessory
+    _avatar_draw_layer(walk, "pants")
+    _avatar_draw_layer(walk, "skin")
+    _avatar_draw_layer(walk, "shirt")
+    _avatar_draw_layer(walk, "hair")
+    _avatar_draw_layer(walk, "accessory")
+
+
+func _avatar_draw_layer(walk: Node2D, layer_id: String) -> void:
+    var opt_id: String = _avatar.get(layer_id, "")
+    if opt_id == "":
+        return
+    var opt: Dictionary = _get_avatar_option(layer_id, opt_id)
+    if opt.is_empty():
+        return
+    for part in opt["parts"]:
+        var rect := ColorRect.new()
+        rect.color = opt["color"]
+        rect.size = Vector2(part["w"], part["h"])
+        rect.position = Vector2(part["x"] - 8, part["y"] - 8)
+        rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+        walk.add_child(rect)
+
+
+func _get_avatar_option(layer_id: String, opt_id: String) -> Dictionary:
+    for opt in AVATAR_PARTS.get(layer_id, []):
+        if opt["id"] == opt_id:
+            return opt
+    return {}
 
 
 func switch_to(transport: String) -> bool:
