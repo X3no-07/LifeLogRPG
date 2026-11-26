@@ -1,30 +1,70 @@
 """Baker 配置读取
 
-从 F:\\LifeLogRPG_Project\\config.json 读 API Key 和参数。
+优先级 (后者覆盖前者):
+1. config.json (入库, key 是占位符)
+2. config.local.json (gitignored, 放真实 key, 只写要覆盖的字段)
+3. 环境变量 LIFELOG_AMAP_KEY / LIFELOG_MINIMAX_KEY (最高, 供 CI / 安全存储注入)
 任何 .gd / .cs / .py 严禁硬编码 Key, 一律走本模块。
 """
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.json"
+LOCAL_CONFIG_NAME = "config.local.json"
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """递归合并: override 只覆盖它写明的字段, 其余保留 base 的。
+    这样 config.local.json 只用写 {"amap": {"api_key": "..."}} 即可。
+    """
+    out = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def _load_json_file(path: Path) -> Dict[str, Any]:
+    """读一个 JSON 配置, 失败返回空 dict (不抛异常)。"""
+    if not path.exists():
+        return {}
+    try:
+        # 用 utf-8-sig 兼容 BOM (PowerShell Set-Content 默认加 BOM)
+        with open(path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[config] ERROR: 解析 {path} 失败: {e}")
+        return {}
 
 
 def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
-    """读 config.json, 不存在时返回硬编码默认值
+    """读 config.json, 再用 config.local.json 和环境变量覆盖。
     不会抛异常, 这样 P0 demo 阶段可以无 Key 跑通 (API 调用时返回 None 即可)
     """
     if not path.exists():
         print(f"[config] WARN: {path} 不存在, 用默认空配置")
-        return _default_config()
-    try:
-        # 用 utf-8-sig 兼容 BOM (PowerShell Set-Content 默认加 BOM)
-        with open(path, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
-        print(f"[config] ERROR: 解析 {path} 失败: {e}")
-        return _default_config()
+        config = _default_config()
+    else:
+        config = _deep_merge(_default_config(), _load_json_file(path))
+    # 2) config.local.json (gitignored) 覆盖, 只写要改的字段
+    local_path = Path(path).parent / LOCAL_CONFIG_NAME
+    local = _load_json_file(local_path)
+    if local:
+        config = _deep_merge(config, local)
+    # 3) 环境变量覆盖 (最高优先级)
+    amap_key = os.environ.get("LIFELOG_AMAP_KEY", "").strip()
+    if amap_key:
+        config.setdefault("amap", {})["api_key"] = amap_key
+    minimax_key = os.environ.get("LIFELOG_MINIMAX_KEY", "").strip()
+    if minimax_key:
+        config.setdefault("minimax", {})["api_key"] = minimax_key
+    return config
 
 
 def _default_config() -> Dict[str, Any]:
