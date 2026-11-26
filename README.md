@@ -26,12 +26,12 @@ LifeLogRPG/
 ├── baker/                     # Python 烘焙包
 │   ├── cli.py                 # 入口：python -m baker.cli
 │   ├── config.py              # 读 config.json
-│   ├── check_api.py           # 测高德 / MiniMax 的 Key 能不能用
+│   ├── check_api.py           # 测高德 / DeepSeek / MiniMax 的 Key 能不能用
 │   ├── grid_preview.py        # 把烘焙好的 log 渲染成 PNG 预览
 │   ├── vlm_qa.py              # vision 模型自动检查地图合理性
 │   ├── generate_tiles.py      # 生成 8 个地形 tile（程序化）
 │   ├── generate_interior_icons.py  # 生成 13 个室内 icon（程序化）
-│   ├── clients/               # 高德 / MiniMax / OSM 三个客户端
+│   ├── clients/               # 高德 / LLM(DeepSeek/MiniMax) / OSM 三个客户端
 │   ├── core/                  # schema / gridifier（栅格化 + 寻路）/ gcj02 / tiling / time_scale
 │   ├── modes/                 # mock / coords / text 三种输入模式
 │   └── tests/                 # pytest，278 个测试
@@ -51,7 +51,7 @@ python -m baker.cli --mock --name log_001
 # 坐标模式：给经纬度序列
 python -m baker.cli --coords "116.40,39.90;116.41,39.91;116.42,39.92" --name log_002
 
-# 文本模式：需要 config.local.json 里有高德 + MiniMax Key
+# 文本模式：需要 config.local.json 里有高德 + DeepSeek Key（默认 LLM 是 DeepSeek，`bake.llm_provider` 可切回 MiniMax）
 python -m baker.cli --text "我从国贸走到三里屯，路上碰到老张，一起去吃了火锅" --name log_003
 ```
 
@@ -125,7 +125,7 @@ godot --headless --quit-after 60 --path .
 
 ## 烘焙是怎么跑的（简版）
 
-1. 文本模式：MiniMax 从日志里提取地点 → 高德 geocode 拿坐标（GCJ-02）→ 转成 WGS84 对齐 OSM → 高德拿路径 → 按路径切一块 160×120 的地图 → OSM 拉路网/建筑/水/绿地 → 栅格化 → A\* 沿路网把路线连起来 → 高德拉周边 POI → 生成对话。
+1. 文本模式：DeepSeek 从日志里提取地点 → 高德 geocode 拿坐标（GCJ-02）→ 转成 WGS84 对齐 OSM → 高德拿路径 → 按路径切一块 160×120 的地图 → OSM 拉路网/建筑/水/绿地 → 栅格化 → A\* 沿路网把路线连起来 → 高德拉周边 POI → 生成对话。
 2. 坐标模式：直接给经纬度，跳过 LLM 和 geocode，后面一样。
 3. mock 模式：预定义数据，什么 Key 都不要。
 
@@ -142,5 +142,5 @@ godot --headless --quit-after 60 --path .
 
 - **API Key**：永远从 `config.local.json`（gitignored）或环境变量 `LIFELOG_AMAP_KEY` / `LIFELOG_MINIMAX_KEY` 读，源码和 `config.json` 里不放真 Key。`config.json` 里的 Key 是占位符。
 - **测试**：`baker/tests/` 里 278 个 pytest 测试，跑 `python -m pytest baker/tests/`。
-- **API 连通性**：`python baker/check_api.py` 测高德和 MiniMax 的 Key 能不能用。
+- **API 连通性**：`python baker/check_api.py` 测高德、DeepSeek 和 MiniMax 的 Key 能不能用。
 - **改接口的规矩**：字段名、模块 API、目录结构变了，要同步改 `baker/core/schema.py` + `scripts/loader.gd` + `INTERFACES.md`，三处对得上。

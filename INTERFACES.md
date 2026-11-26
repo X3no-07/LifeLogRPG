@@ -41,7 +41,7 @@ LifeLogRPG/
 │   ├── generate_interior_icons.py # 生成 13 个室内 icon
 │   ├── clients\                  # 外部 API 客户端
 │   │   ├── amap.py               # 高德 REST (AmapClient)
-│   │   ├── llm.py                # MiniMax (LLMClient)
+│   │   ├── llm.py                # LLM (LLMClient, DeepSeek/MiniMax)
 │   │   └── osm.py                # OSM Overpass (OsmClient + parse_overpass)
 │   ├── modes\                    # 输入模式 (Strategy)
 │   │   ├── base.py               # BaseMode
@@ -202,7 +202,8 @@ python -m baker.cli [OPTIONS]
 {
   "amap":     { "api_key", "base_url", "timeout_sec" },
   "minimax":  { "api_key", "group_id", "base_url", "text_model", "vision_model", "timeout_sec" },
-  "bake":     { "output_dir", "tile_size_px", "viewport_grid_w", "viewport_grid_h", "default_city", "weather_seed" },
+  "deepseek": { "api_key", "base_url", "text_model", "timeout_sec" },
+  "bake":     { "output_dir", "tile_size_px", "viewport_grid_w", "viewport_grid_h", "default_city", "weather_seed", "llm_provider" },
   "playback": { "default_speed", "min_speed", "max_speed" },
   "export":   { "video_default_duration_sec", "video_fps", "video_resolution", "ffmpeg_path" }
 }
@@ -216,6 +217,9 @@ python -m baker.cli [OPTIONS]
 | `amap.base_url` | `https://restapi.amap.com/v3` |
 | `minimax.base_url` | `https://api.minimaxi.com/v1` |
 | `minimax.text_model` | `MiniMax-M3.1-Flash` |
+| `deepseek.base_url` | `https://api.deepseek.com/v1` |
+| `deepseek.text_model` | `deepseek-chat` |
+| `bake.llm_provider` | `"deepseek"` |
 | `minimax.vision_model` | `abab6.5s-chat` |
 | `bake.tile_size_px` | `16` |
 | `bake.viewport_grid_w` | `160` |

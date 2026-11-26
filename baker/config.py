@@ -3,7 +3,7 @@
 优先级 (后者覆盖前者):
 1. config.json (入库, key 是占位符)
 2. config.local.json (gitignored, 放真实 key, 只写要覆盖的字段)
-3. 环境变量 LIFELOG_AMAP_KEY / LIFELOG_MINIMAX_KEY (最高, 供 CI / 安全存储注入)
+3. 环境变量 LIFELOG_AMAP_KEY / LIFELOG_MINIMAX_KEY / LIFELOG_DEEPSEEK_KEY (最高, 供 CI / 安全存储注入)
 任何 .gd / .cs / .py 严禁硬编码 Key, 一律走本模块。
 """
 import json
@@ -64,6 +64,9 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
     minimax_key = os.environ.get("LIFELOG_MINIMAX_KEY", "").strip()
     if minimax_key:
         config.setdefault("minimax", {})["api_key"] = minimax_key
+    deepseek_key = os.environ.get("LIFELOG_DEEPSEEK_KEY", "").strip()
+    if deepseek_key:
+        config.setdefault("deepseek", {})["api_key"] = deepseek_key
     return config
 
 
@@ -74,10 +77,15 @@ def _default_config() -> Dict[str, Any]:
             "api_key": "", "group_id": "", "base_url": "https://api.minimaxi.com/v1",
             "text_model": "MiniMax-M3.1-Flash", "vision_model": "abab6.5s-chat", "timeout_sec": 30,
         },
+        "deepseek": {
+            "api_key": "", "base_url": "https://api.deepseek.com/v1",
+            "text_model": "deepseek-chat", "timeout_sec": 30,
+        },
         "bake": {
             "output_dir": str(PROJECT_ROOT / "saved_logs"),
             "tile_size_px": 16, "viewport_grid_w": 160, "viewport_grid_h": 120,
             "default_city": "北京", "weather_seed": 42,
+            "llm_provider": "deepseek",
         },
         "playback": {"default_speed": 1.0, "min_speed": 0.25, "max_speed": 8.0},
     }
@@ -93,6 +101,15 @@ def get_minimax_key(config: Dict[str, Any]) -> str:
 
 def get_minimax_group(config: Dict[str, Any]) -> str:
     return config.get("minimax", {}).get("group_id", "")
+
+
+def get_deepseek_key(config: Dict[str, Any]) -> str:
+    return config.get("deepseek", {}).get("api_key", "")
+
+
+def get_llm_provider(config: Dict[str, Any]) -> str:
+    """当前用的 LLM provider: "deepseek" 或 "minimax" (默认 deepseek)。"""
+    return config.get("bake", {}).get("llm_provider", "deepseek")
 
 
 def get_output_dir(config: Dict[str, Any]) -> Path:

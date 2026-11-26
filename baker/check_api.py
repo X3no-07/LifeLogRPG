@@ -119,6 +119,39 @@ def test_minimax(api_key: str, group_id: str, base_url: str = "https://api.minim
         return False
 
 
+def test_deepseek(api_key: str, base_url: str = "https://api.deepseek.com/v1",
+                  model: str = "deepseek-chat") -> bool:
+    """测试 DeepSeek 文本生成 API (OpenAI 兼容格式)"""
+    import requests
+    print(f"\n[4] DeepSeek 文本 API (model={model})")
+    print("-" * 50)
+    url = f"{base_url}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "用一句话说'你好'"}],
+        "max_tokens": 50,
+    }
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        data = r.json()
+        if "choices" in data and len(data["choices"]) > 0:
+            content = data["choices"][0].get("message", {}).get("content", "")
+            print(f"  ✓ HTTP {r.status_code}")
+            print(f"  ✓ 模型回复: {content[:200]}")
+            return True
+        else:
+            print(f"  ✗ HTTP {r.status_code}")
+            print(f"  返回: {json.dumps(data, ensure_ascii=False, indent=2)[:500]}")
+            return False
+    except Exception as e:
+        print(f"  ✗ 异常: {e}")
+        return False
+
+
 def main():
     config = load_config()
     amap_key = config.get("amap", {}).get("api_key", "")
@@ -127,6 +160,9 @@ def main():
     mm_group = config.get("minimax", {}).get("group_id", "")
     mm_base = config.get("minimax", {}).get("base_url", "https://api.minimaxi.com/v1")
     mm_model = config.get("minimax", {}).get("text_model", "MiniMax-M3.1-Flash")
+    ds_key = config.get("deepseek", {}).get("api_key", "")
+    ds_base = config.get("deepseek", {}).get("base_url", "https://api.deepseek.com/v1")
+    ds_model = config.get("deepseek", {}).get("text_model", "deepseek-chat")
 
     print("=" * 60)
     print("Life Log RPG - API 连通性测试")
@@ -134,6 +170,7 @@ def main():
     print(f"高德 Key: {amap_key[:6]}...{amap_key[-4:]} ({'已填' if amap_key else '空'})")
     print(f"MiniMax Key: {mm_key[:10]}...{mm_key[-4:]} ({'已填' if mm_key else '空'})")
     print(f"MiniMax group_id: '{mm_group}' ({'已填' if mm_group else '空'})")
+    print(f"DeepSeek Key: {ds_key[:10]}...{ds_key[-4:]} ({'已填' if ds_key else '空'})")
 
     results = []
     if amap_key:
@@ -145,6 +182,10 @@ def main():
         results.append(("MiniMax 文本", test_minimax(mm_key, mm_group, mm_base, mm_model)))
     else:
         print("\n[!] MiniMax Key 为空, 跳过")
+    if ds_key:
+        results.append(("DeepSeek 文本", test_deepseek(ds_key, ds_base, ds_model)))
+    else:
+        print("\n[!] DeepSeek Key 为空, 跳过")
 
     print("\n" + "=" * 60)
     print("汇总:")

@@ -1,7 +1,7 @@
 """外部 API 客户端
 
 - AmapClient: 高德地图 REST API (geocode / place_text / place_around / route)
-- LLMClient: MiniMax 文本 API
+- LLMClient: LLM 文本 API (MiniMax / DeepSeek, 配置切换)
 - OsmClient: OpenStreetMap Overpass API (路网/建筑/水系/绿化)
 """
 from .amap import AmapClient

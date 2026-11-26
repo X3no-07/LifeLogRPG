@@ -1,6 +1,9 @@
-"""MiniMax LLM 客户端
+"""LLM 客户端, 支持 MiniMax 和 DeepSeek 两个 provider (配置切换)
 
-调用 https://api.minimaxi.com/v1/text/chatcompletion_v2
+- minimax: POST {base_url}/text/chatcompletion_v2 (MiniMax 私有格式, group_id query)
+- deepseek: POST {base_url}/chat/completions (OpenAI 兼容格式)
+两者返回都是 choices[0].message.content, 上层解析逻辑共用。
+
 封装 3 个常用场景:
 - extract_places(text) -> [str, ...]  提取地点
 - generate_meta(text, places) -> dict  生成 weather / mood / dialogs
@@ -19,13 +22,15 @@ class LLMClient:
     def __init__(self, api_key: str, group_id: str = "",
                  base_url: str = "https://api.minimaxi.com/v1",
                  model: str = "MiniMax-M3.1-Flash",
-                 timeout: int = 30, verbose: bool = False):
+                 timeout: int = 30, verbose: bool = False,
+                 provider: str = "minimax"):
         self.api_key = api_key
         self.group_id = group_id
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.verbose = verbose
+        self.provider = provider
         self._requests = None
         if api_key:
             try:
@@ -48,9 +53,13 @@ class LLMClient:
         """通用 chat, 返回 content 文本 (不解析)"""
         if not self.enabled():
             return None
-        url = f"{self.base_url}/text/chatcompletion_v2"
-        if self.group_id:
-            url += f"?groupId={self.group_id}"
+        if self.provider == "deepseek":
+            # OpenAI 兼容格式, 不用 group_id
+            url = f"{self.base_url}/chat/completions"
+        else:
+            url = f"{self.base_url}/text/chatcompletion_v2"
+            if self.group_id:
+                url += f"?groupId={self.group_id}"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -66,12 +75,18 @@ class LLMClient:
             data = r.json()
             if "choices" in data and data["choices"]:
                 return data["choices"][0]["message"]["content"]
-            # 无 choices: 把服务端的错误原因打出来 (模型下架 2069 / 余额不足 1008 等),
-            # 否则上层只看到 None, 查不出原因
-            base = data.get("base_resp", {}) if isinstance(data, dict) else {}
-            if base.get("status_code"):
-                print(f"[llm] API 错误: {base.get('status_code')} {base.get('status_msg', '')} (model={self.model})",
+            # 无 choices: 把服务端的错误原因打出来, 否则上层只看到 None, 查不出原因
+            if self.provider == "deepseek":
+                # OpenAI 兼容错误: {"error": {"message": ..., "code": ...}}, HTTP 401/402
+                err = data.get("error", {}) if isinstance(data, dict) else {}
+                print(f"[llm] API 错误: HTTP {r.status_code} {err.get('message', '')} (model={self.model})",
                       file=sys.stderr)
+            else:
+                # MiniMax 错误: base_resp.status_code (模型下架 2069 / 余额不足 1008 等)
+                base = data.get("base_resp", {}) if isinstance(data, dict) else {}
+                if base.get("status_code"):
+                    print(f"[llm] API 错误: {base.get('status_code')} {base.get('status_msg', '')} (model={self.model})",
+                          file=sys.stderr)
         except Exception as e:
             self._log(f"chat error: {e}")
         return None

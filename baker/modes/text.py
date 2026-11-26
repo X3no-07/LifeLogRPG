@@ -57,12 +57,25 @@ class TextMode(BaseMode):
     def __init__(self, name: str, text: str, config: Optional[Dict[str, Any]] = None):
         super().__init__(name, config)
         self.text = text
-        self.llm = LLMClient(
-            api_key=self.config.get("minimax", {}).get("api_key", ""),
-            group_id=self.config.get("minimax", {}).get("group_id", ""),
-            base_url=self.config.get("minimax", {}).get("base_url", "https://api.minimaxi.com/v1"),
-            model=self.config.get("minimax", {}).get("text_model", "MiniMax-M3.1-Flash"),
-        )
+        # LLM provider 由 bake.llm_provider 选 ("deepseek" / "minimax"), 默认 deepseek;
+        # 每个 provider 读自己那节的 api_key / base_url / text_model, MiniMax 的路保留
+        self.llm_provider = self.config.get("bake", {}).get("llm_provider", "deepseek")
+        if self.llm_provider == "deepseek":
+            _llm_cfg = self.config.get("deepseek", {})
+            self.llm = LLMClient(
+                api_key=_llm_cfg.get("api_key", ""),
+                base_url=_llm_cfg.get("base_url", "https://api.deepseek.com/v1"),
+                model=_llm_cfg.get("text_model", "deepseek-chat"),
+                provider="deepseek",
+            )
+        else:
+            self.llm = LLMClient(
+                api_key=self.config.get("minimax", {}).get("api_key", ""),
+                group_id=self.config.get("minimax", {}).get("group_id", ""),
+                base_url=self.config.get("minimax", {}).get("base_url", "https://api.minimaxi.com/v1"),
+                model=self.config.get("minimax", {}).get("text_model", "MiniMax-M3.1-Flash"),
+                provider="minimax",
+            )
         self.amap = AmapClient(
             api_key=self.config.get("amap", {}).get("api_key", ""),
             base_url=self.config.get("amap", {}).get("base_url", "https://restapi.amap.com/v3"),
