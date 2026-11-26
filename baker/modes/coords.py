@@ -11,6 +11,7 @@ from typing import List, Tuple, Optional, Dict, Any
 from ..core.gridifier import (
     build_grid_from_waypoints, osm_to_grid,
     polyline_to_points, approx_distance_km, densify_and_snap_route,
+    route_along_roads, apply_path_overlay, carve_route_passages,
 )
 from ..core.gcj02 import gcj02_to_wgs84, wgs84_to_gcj02, gcj02_to_wgs84_points
 from ..core.tiling import slice_around_path, lnglat_to_grid_cell
@@ -180,25 +181,27 @@ class CoordsMode(BaseMode):
                   f"{tm.distance_m/1000:.1f}km / {tm.duration_sec:.0f}s")
 
         # 路径投影: 用 walking_pts (避免 transit 端点污染)
-        # 路线贴路: 统一用切片 bbox 投影 (跟 grid 同系), 再沿 OSM 路中心线
-        # 加密 + 吸附, 不直线横切进湖/穿楼
-        if walking_pts:
-            path_source = walking_pts
-            path_waypoints_grid = densify_and_snap_route(
-                path_source, parsed_osm.get("roads", []), bbox,
-                (p.map.width, p.map.height))
-            print(f"[coords] Path 投影(贴路): {len(path_source)} -> {len(path_waypoints_grid)} grid points")
-        else:
-            # 全 driving/transit: 无 street-level path, 用单点 placeholder
-            path_waypoints_grid = []
-            print(f"[coords] Path 投影: 无 walking 段, path 仅含 transit teleport")
-
+        # 路线贴路: 先造干净网格 (不带 overlay), 再沿路网 A* 寻路,
+        # 最后把路线叠到网格上。没 OSM 数据时回退到加密 + 局部吸附。
         if parsed_osm["roads"] or parsed_osm["buildings"]:
             # P1.2: 多回传 building_heights
             grid, building_heights, osm_debug = osm_to_grid(
                 parsed_osm, bbox, (p.map.width, p.map.height),
-                path_overlay_waypoints=path_waypoints_grid,
             )
+            if walking_pts:
+                path_waypoints_grid = route_along_roads(
+                    walking_pts, grid, bbox, (p.map.width, p.map.height),
+                    osm_roads=parsed_osm.get("roads", []))
+                print(f"[coords] Path 投影(沿路网寻路): {len(walking_pts)} -> {len(path_waypoints_grid)} grid points")
+            else:
+                # 全 driving/transit: 无 street-level path, 用单点 placeholder
+                path_waypoints_grid = []
+                print(f"[coords] Path 投影: 无 walking 段, path 仅含 transit teleport")
+            # 门洞/桥处短暂穿墙的格子刻成路 (真实走道, 只是被楼盖住了)
+            n_carved = carve_route_passages(grid, path_waypoints_grid, building_heights)
+            if n_carved:
+                print(f"[coords] 路线刻通道: {n_carved} 格 (门洞/桥)")
+            apply_path_overlay(grid, path_waypoints_grid)
             p.map.grid = grid
             p.map.building_heights = building_heights
             n_with_levels = sum(1 for row in building_heights for v in row if v > 0)
@@ -226,6 +229,13 @@ class CoordsMode(BaseMode):
                 ))
             print(f"[coords] P1.3 interior slots: {len(p.interiors)}")
         else:
+            # fallback: 没 OSM 数据, 加密 + 局部吸附 (无路网可寻)
+            if walking_pts:
+                path_waypoints_grid = densify_and_snap_route(
+                    walking_pts, [], bbox, (p.map.width, p.map.height))
+                print(f"[coords] Path 投影(贴路): {len(walking_pts)} -> {len(path_waypoints_grid)} grid points")
+            else:
+                path_waypoints_grid = []
             p.map.grid = build_grid_from_waypoints(path_waypoints_grid, p.map.width, p.map.height)
 
         # 时间分布: walking_total + transit_total

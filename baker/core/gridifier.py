@@ -6,8 +6,10 @@
 - Bresenham 画线连接端点
 - 自动点缀 tree / building 让地图不空
 """
+import heapq
 import math
 import random
+from collections import deque
 from typing import List, Tuple, Dict, Any
 
 from PIL import Image, ImageDraw
@@ -245,13 +247,12 @@ def osm_to_grid(parsed_osm: Dict[str, List[Dict[str, Any]]],
         pts = _project_floats(b["nodes"], bbox, grid_size)
         _pil_poly(hd, pts, levels, line_width=1)
 
-    # 6) path overlay (用户走过的路径)
-    if path_overlay_waypoints:
-        pts = [(p["x"], p["y"]) for p in path_overlay_waypoints]
-        _pil_line(dr, pts, CELL_ROAD, width=3)
-
+    # 6) path overlay (用户走过的路径; 抽成 apply_path_overlay, 干净网格
+    #    也能事后叠加, 不用重栅格化)
     grid = [[grid_img.getpixel((x, y)) for x in range(w)] for y in range(h)]
     building_heights = [[heights_img.getpixel((x, y)) for x in range(w)] for y in range(h)]
+    if path_overlay_waypoints:
+        apply_path_overlay(grid, path_overlay_waypoints)
 
     # debug info
     counts = _count_cells(grid)
@@ -434,6 +435,293 @@ def _seg_closest(px: float, py: float, ax: float, ay: float,
     t = max(0.0, min(1.0, (wx * vx + wy * vy) / s2))
     cx, cy = ax + t * vx, ay + t * vy
     return math.hypot(px - cx, py - cy), cx, cy
+
+
+# ----------------------------------------------------------------------------
+#  沿路网寻路: 局部吸附修不好的路线 (锚点偏离路网太远, 直线横切进楼),
+#  改成把路网当图、A* 沿着路从起点走到终点, 全程不进楼不进水。
+#  densify_and_snap_route 只在半径内找最近的路 (故宫南边一段偏 25 格,
+#  半径 15 都够不着); 这里锚点先吸附到可走格, 再逐段 A*, 保证连通。
+# ----------------------------------------------------------------------------
+
+def _route_cell_cost(cell: int):
+    """进该格的代价; None = 不可走。
+    路/广场/人行道 1.0 (首选); 草地 4.0 (没路时可借道); 树 8.0;
+    楼/水/POI 标记不可走。"""
+    if cell in (CELL_ROAD, CELL_PLAZA, CELL_SIDEWALK):
+        return 1.0
+    if cell == CELL_GRASS:
+        return 4.0
+    if cell == CELL_TREE:
+        return 8.0
+    return None
+
+
+def snap_to_passable(grid: Grid, x: float, y: float) -> Tuple[int, int]:
+    """(x, y) 附近最近的可走格 (BFS 四向扩散)。本身可走就返回本身;
+    整张图都不可走时返回 clamp 后的原点。"""
+    h = len(grid)
+    w = len(grid[0]) if h > 0 else 0
+    if h == 0 or w == 0:
+        return (0, 0)
+    x = max(0, min(w - 1, int(round(x))))
+    y = max(0, min(h - 1, int(round(y))))
+    if _route_cell_cost(grid[y][x]) is not None:
+        return (x, y)
+    seen = {(x, y)}
+    dq = deque([(x, y)])
+    while dq:
+        cx, cy = dq.popleft()
+        for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+            if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in seen:
+                seen.add((nx, ny))
+                if _route_cell_cost(grid[ny][nx]) is not None:
+                    return (nx, ny)
+                dq.append((nx, ny))
+    return (x, y)
+
+
+def _astar_cell_cost(cell: int, on_road: bool = False) -> float:
+    """A* 进该格的代价。
+    路/广场/人行道 1.0; 草地 4.0; 树 8.0。
+    楼/水原则上不可走, 但路网常被楼/水切断 (宫墙、门洞、河):
+    - on_road=True (该格有 OSM 路穿过, 比如门洞、桥) -> 20.0,
+      寻路会在这儿过, 且只走最窄的一处;
+    - on_road=False (实心大殿、整片水面) -> 500.0, 只有实在没路时才穿,
+      且 A* 会选最窄的穿法, 不会为抄近道穿大殿。"""
+    c = _route_cell_cost(cell)
+    if c is not None:
+        return c
+    if cell in (CELL_BUILDING, CELL_WATER):
+        return 20.0 if on_road else 500.0
+    return 500.0
+
+
+def _road_proximity_mask(osm_roads: List[Dict[str, Any]],
+                         bbox: Tuple[float, float, float, float],
+                         grid_size: Tuple[int, int],
+                         radius: int = 2) -> set:
+    """OSM 路中心线附近的格子集合 (半径 radius 格)。
+    用来判断楼/水格是不是真门口/真桥: 有路穿过的楼格才能便宜穿。"""
+    w, h = grid_size
+    img = Image.new("L", (w, h), 0)
+    dr = ImageDraw.Draw(img)
+    for r in osm_roads or []:
+        pts = _project_floats(r.get("nodes", []), bbox, grid_size)
+        _pil_line(dr, pts, 1, width=2 * radius + 1)
+    px = img.load()
+    return {(x, y) for y in range(h) for x in range(w) if px[x, y] == 1}
+
+
+def find_path_on_grid(grid: Grid, start: Tuple[int, int],
+                      end: Tuple[int, int],
+                      road_mask=None) -> List[Tuple[int, int]]:
+    """A* 沿可走格从 start 走到 end (含两端)。
+    八方向, 斜走不切角 (两边正交格都得是真可走格, 不从楼角斜穿过去);
+    代价按进格的 cell 类型 (路 1, 草 4, 树 8, 有路穿过的楼/水 20,
+    实心楼/水 500), 启发式是 octile 距离。
+    起/终点本身在楼/水里时先吸附到可走格。实在无路时回退成直线,
+    保证调用方总有路线。
+    road_mask: _road_proximity_mask() 的返回值 (没有就全按 500 算)。"""
+    h = len(grid)
+    w = len(grid[0]) if h > 0 else 0
+    if h == 0 or w == 0:
+        return []
+    sx, sy = snap_to_passable(grid, start[0], start[1])
+    ex, ey = snap_to_passable(grid, end[0], end[1])
+    if (sx, sy) == (ex, ey):
+        return [(sx, sy)]
+
+    _DIRS = ((1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+             (1, 1, 1.41421356), (1, -1, 1.41421356),
+             (-1, 1, 1.41421356), (-1, -1, 1.41421356))
+
+    def _heur(x: int, y: int) -> float:
+        dx = abs(x - ex)
+        dy = abs(y - ey)
+        return max(dx, dy) + 0.41421356 * min(dx, dy)
+
+    def _cost(nx: int, ny: int) -> float:
+        on_road = road_mask is not None and (nx, ny) in road_mask
+        return _astar_cell_cost(grid[ny][nx], on_road)
+
+    open_heap = [(_heur(sx, sy), 0.0, sx, sy)]
+    gscore = {(sx, sy): 0.0}
+    came: Dict[Tuple[int, int], Tuple[int, int]] = {}
+    closed = set()
+    while open_heap:
+        _, g, x, y = heapq.heappop(open_heap)
+        if (x, y) in closed:
+            continue
+        closed.add((x, y))
+        if (x, y) == (ex, ey):
+            path = [(x, y)]
+            while (x, y) in came:
+                x, y = came[(x, y)]
+                path.append((x, y))
+            path.reverse()
+            return path
+        for dx, dy, base in _DIRS:
+            nx, ny = x + dx, y + dy
+            if not (0 <= nx < w and 0 <= ny < h):
+                continue
+            if (nx, ny) in closed:
+                continue
+            if dx and dy:
+                # 斜走不切角: 两边正交格都得是真可走格
+                if (_route_cell_cost(grid[y][nx]) is None
+                        or _route_cell_cost(grid[ny][x]) is None):
+                    continue
+            ng = g + base * _cost(nx, ny)
+            if ng < gscore.get((nx, ny), float("inf")):
+                gscore[(nx, ny)] = ng
+                came[(nx, ny)] = (x, y)
+                heapq.heappush(open_heap, (ng + _heur(nx, ny), ng, nx, ny))
+    # 无路: 直线回退
+    return _straight_line_cells(sx, sy, ex, ey)
+
+
+def _straight_line_cells(x0: int, y0: int, x1: int, y1: int) -> List[Tuple[int, int]]:
+    """Bresenham 直线整数点列 (含两端), 寻路无路时的回退。"""
+    pts: List[Tuple[int, int]] = []
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx - dy
+    x, y = x0, y0
+    while True:
+        pts.append((x, y))
+        if x == x1 and y == y1:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x += sx
+        if e2 < dx:
+            err += dx
+            y += sy
+    return pts
+
+
+def route_along_roads(route_pts_lnglat: List[Tuple[float, float]],
+                      grid: Grid,
+                      bbox: Tuple[float, float, float, float],
+                      grid_size: Tuple[int, int],
+                      max_gap_cells: float = 2.0,
+                      osm_roads: List[Dict[str, Any]] = None,
+                      ) -> List[Dict[str, int]]:
+    """路线点 (lng, lat) -> 沿路网寻路 -> grid waypoints。
+
+    1. 锚点统一用切片 bbox 投影 (跟 grid 同系, 跟 densify_and_snap_route
+       同样修过投影错位)。
+    2. 每个锚点吸附到最近的可走格 (BFS, 不限半径, 南边偏 25 格也能回来)。
+    3. 相邻锚点之间 A* 沿路走, 拼成整条路线。楼/水原则上不走, 但有
+       OSM 路穿过的楼/水格 (门洞、桥) 可以便宜穿, 实心大殿/水面只有
+       实在没路时才穿、且走最窄处; 所以全程基本在路/广场上, 只在门洞
+       处短暂穿墙。穿过的楼/水格由 carve_route_passages() 刻成路。
+    4. 按路径长度加密到 ~max_gap_cells 一点, 首尾必留。
+
+    route_pts_lnglat: [(lng, lat), ...] WGS84
+    grid: 干净网格 (不带 path overlay, 不然旧路线画出的路会造假路)
+    osm_roads: parsed_osm["roads"] (没有就按实心楼/水 500 算)
+    返回: [{"x": int, "y": int}, ...] 去重连续点。
+    """
+    w, h = grid_size
+    if not route_pts_lnglat:
+        return []
+    fpts = _project_floats(route_pts_lnglat, bbox, grid_size)
+    if len(fpts) == 1:
+        gx, gy = snap_to_passable(grid, fpts[0][0], fpts[0][1])
+        return [{"x": gx, "y": gy}]
+
+    # 2) 锚点吸附 + 去重
+    anchors: List[Tuple[int, int]] = []
+    for fx, fy in fpts:
+        s = snap_to_passable(grid, fx, fy)
+        if not anchors or anchors[-1] != s:
+            anchors.append(s)
+    if len(anchors) == 1:
+        return [{"x": anchors[0][0], "y": anchors[0][1]}]
+
+    # 路网掩码: 有 OSM 路穿过的格子 (门洞、桥才能便宜穿)
+    road_mask = _road_proximity_mask(osm_roads, bbox, grid_size) if osm_roads else None
+
+    # 3) 逐段 A*, 拼接
+    full: List[Tuple[int, int]] = []
+    for a, b in zip(anchors, anchors[1:]):
+        seg = find_path_on_grid(grid, a, b, road_mask=road_mask)
+        if full and seg and seg[0] == full[-1]:
+            seg = seg[1:]
+        full.extend(seg)
+    if not full:
+        return []
+
+    # 4) 按路径长度加密
+    out: List[Tuple[int, int]] = [full[0]]
+    acc = 0.0
+    for p, q in zip(full, full[1:]):
+        acc += math.hypot(q[0] - p[0], q[1] - p[1])
+        if acc >= max_gap_cells:
+            out.append(q)
+            acc = 0.0
+    if out[-1] != full[-1]:
+        out.append(full[-1])
+    ded: List[Dict[str, int]] = []
+    for x, y in out:
+        if not ded or ded[-1] != {"x": x, "y": y}:
+            ded.append({"x": x, "y": y})
+    return ded
+
+
+def carve_route_passages(grid: Grid, waypoints: List[Dict[str, int]],
+                         building_heights: List[List[int]] = None) -> int:
+    """把路线上穿过的楼/水格刻成路 (原地修改 grid, 返回刻了几格)。
+    寻路只在门洞/桥处短暂穿墙 (有 OSM 路穿过的格子), 这些格子本来
+    就是真实走道, 只是被楼的多边形盖住了; 刻成路后网格跟真实走法
+    一致, 路线采样验 (路/广场) 才能过, 渲染时门洞处也不再是整块楼。
+    路点之间连线上的格子也一起刻 (加密后路点间隔 ~2 格, 中间那格
+    不刻会留个楼格子)。building_heights 一起传进来时, 刻掉的格子
+    层数也清零。"""
+    h = len(grid)
+    w = len(grid[0]) if h > 0 else 0
+    carved = 0
+
+    def _carve(x: int, y: int) -> None:
+        nonlocal carved
+        if 0 <= x < w and 0 <= y < h and grid[y][x] in (CELL_BUILDING, CELL_WATER):
+            grid[y][x] = CELL_ROAD
+            if building_heights is not None:
+                building_heights[y][x] = 0
+            carved += 1
+
+    pts = [(p["x"], p["y"]) for p in waypoints]
+    for (x, y) in pts:
+        _carve(x, y)
+    for a, b in zip(pts, pts[1:]):
+        for (x, y) in _straight_line_cells(a[0], a[1], b[0], b[1]):
+            _carve(x, y)
+    return carved
+
+
+def apply_path_overlay(grid: Grid, waypoints: List[Dict[str, int]],
+                       width: int = 3) -> None:
+    """把路线画到已有的 grid 上 (原地修改, 画成路)。
+    osm_to_grid 第 6 步就是调它; 先造干净网格再寻路的调用方, 寻完路
+    后调它叠加, 不用重栅格化整张图。"""
+    h = len(grid)
+    w = len(grid[0]) if h > 0 else 0
+    if h == 0 or w == 0 or not waypoints:
+        return
+    img = Image.new("L", (w, h), 0)
+    img.putdata([v for row in grid for v in row])
+    dr = ImageDraw.Draw(img)
+    pts = [(p["x"], p["y"]) for p in waypoints]
+    _pil_line(dr, pts, CELL_ROAD, width=width)
+    px = img.load()
+    for y in range(h):
+        for x in range(w):
+            grid[y][x] = px[x, y]
 
 
 def _stamp_building_heights(heights: List[List[int]],
