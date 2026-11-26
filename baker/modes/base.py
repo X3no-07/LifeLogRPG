@@ -23,8 +23,8 @@ class BaseMode(ABC):
             created_at=time.strftime("%Y-%m-%d %H:%M:%S"),
         )
         bake_cfg = self.config.get("bake", {})
-        grid_w = int(bake_cfg.get("viewport_grid_w", 80))
-        grid_h = int(bake_cfg.get("viewport_grid_h", 60))
+        grid_w = int(bake_cfg.get("viewport_grid_w", 160))
+        grid_h = int(bake_cfg.get("viewport_grid_h", 120))
         tile_size = int(bake_cfg.get("tile_size_px", 16))
         map_data = MapData(tile_size=tile_size, width=grid_w, height=grid_h, grid=[])
         payload = LogPayload(meta=meta, map=map_data)

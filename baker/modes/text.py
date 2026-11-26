@@ -16,9 +16,10 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.gridifier import (
-    polyline_to_points, points_to_grid, build_grid_from_waypoints,
-    compute_bounds, approx_distance_km, osm_to_grid,
+    polyline_to_points, build_grid_from_waypoints,
+    approx_distance_km, osm_to_grid, densify_and_snap_route,
 )
+from ..core.gcj02 import gcj02_to_wgs84, wgs84_to_gcj02, gcj02_to_wgs84_points
 from ..core.tiling import slice_around_path, lnglat_to_grid_cell
 from ..core.time_scale import normalize_dialog_times
 from ..core.schema import Waypoint, Dialog, POI, TransitMarker, InteriorSlot
@@ -96,7 +97,10 @@ class TextMode(BaseMode):
         #   - walking/bicycling 段: polyline 加到 walking_pts (街道级, 用于切片)
         #   - driving/transit 段: 不加到 walking_pts, 改存为 transit_marker (pin 显示)
         #   - all_waypoints_px 仍记全部, 用于 path 动画
+        # 高德返回的是 GCJ-02: route 入参和距离估算直接用它,
+        # 切片/投影一律用转成 WGS84 的 coords_wgs (OSM 是 WGS84)
         coords = [(g["lng"], g["lat"]) for g in geo_results]
+        coords_wgs = [gcj02_to_wgs84(lng, lat) for lng, lat in coords]
         all_waypoints_px: List[Tuple[float, float]] = []
         walking_pts: List[Tuple[float, float]] = []   # 仅街道级 (用于 bbox 切片)
         seg_durations: List[float] = []               # 每段时长 (秒), 给 waypoint 计时用
@@ -120,38 +124,38 @@ class TextMode(BaseMode):
                 seg_duration = route.get("duration", 60.0)
                 seg_durations.append(seg_duration)
                 if mode in ("walking", "bicycling"):
-                    # 街道级, 全部入 walking_pts
-                    pts = polyline_to_points(route["polyline"])
+                    # 街道级, 全部入 walking_pts (polyline 是 GCJ-02, 先转 WGS84)
+                    pts = gcj02_to_wgs84_points(polyline_to_points(route["polyline"]))
                     walking_pts.extend(pts)
                     all_waypoints_px.extend(pts)
                 elif mode == "transit":
                     # 只取 walking 子段 (高德返回里 walking_polyline 字段是 walking 部分)
                     wp_str = route.get("walking_polyline", "")
                     if wp_str:
-                        wp_pts = polyline_to_points(wp_str)
+                        wp_pts = gcj02_to_wgs84_points(polyline_to_points(wp_str))
                         walking_pts.extend(wp_pts)
                         all_waypoints_px.extend(wp_pts)
                     # 公交段端点也加到 all_waypoints (但不入 walking_pts)
-                    all_waypoints_px.append(coords[i])
-                    all_waypoints_px.append(coords[i + 1])
-                    # 记 transit_marker
+                    all_waypoints_px.append(coords_wgs[i])
+                    all_waypoints_px.append(coords_wgs[i + 1])
+                    # 记 transit_marker (存 WGS84, 跟 grid/bbox 同系)
                     p.transit_markers.append(TransitMarker(
                         name=geo_results[i + 1]["name"],
                         transport="transit",
-                        start_lng=coords[i][0], start_lat=coords[i][1],
-                        end_lng=coords[i + 1][0], end_lat=coords[i + 1][1],
+                        start_lng=coords_wgs[i][0], start_lat=coords_wgs[i][1],
+                        end_lng=coords_wgs[i + 1][0], end_lat=coords_wgs[i + 1][1],
                         distance_m=route.get("distance", 0.0),
                         duration_sec=route.get("duration", 0.0),
                     ))
                 else:  # driving
                     # 不入 walking_pts, 但记两端
-                    all_waypoints_px.append(coords[i])
-                    all_waypoints_px.append(coords[i + 1])
+                    all_waypoints_px.append(coords_wgs[i])
+                    all_waypoints_px.append(coords_wgs[i + 1])
                     p.transit_markers.append(TransitMarker(
                         name=geo_results[i + 1]["name"],
                         transport="driving",
-                        start_lng=coords[i][0], start_lat=coords[i][1],
-                        end_lng=coords[i + 1][0], end_lat=coords[i + 1][1],
+                        start_lng=coords_wgs[i][0], start_lat=coords_wgs[i][1],
+                        end_lng=coords_wgs[i + 1][0], end_lat=coords_wgs[i + 1][1],
                         distance_m=route.get("distance", 0.0),
                         duration_sec=route.get("duration", 0.0),
                     ))
@@ -159,21 +163,21 @@ class TextMode(BaseMode):
             else:
                 # P0.4: 即使 API 失败, 也不污染 walking_pts (避免 transit 端点撑大 bbox)
                 print(f"[text]     {mode} 路径 API 失败, fallback 端点 only")
-                all_waypoints_px.append(coords[i])
-                all_waypoints_px.append(coords[i + 1])
+                all_waypoints_px.append(coords_wgs[i])
+                all_waypoints_px.append(coords_wgs[i + 1])
                 if mode in ("transit", "driving"):
                     # transit/driving 端点入 transit_marker
                     p.transit_markers.append(TransitMarker(
                         name=geo_results[i + 1]["name"],
                         transport=mode,
-                        start_lng=coords[i][0], start_lat=coords[i][1],
-                        end_lng=coords[i + 1][0], end_lat=coords[i + 1][1],
+                        start_lng=coords_wgs[i][0], start_lat=coords_wgs[i][1],
+                        end_lng=coords_wgs[i + 1][0], end_lat=coords_wgs[i + 1][1],
                         distance_m=0.0, duration_sec=0.0,
                     ))
                 else:
                     # walking/bicycling fallback: 直线, 入 walking_pts
-                    walking_pts.append(coords[i])
-                    walking_pts.append(coords[i + 1])
+                    walking_pts.append(coords_wgs[i])
+                    walking_pts.append(coords_wgs[i + 1])
                 seg_durations.append(60.0)
                 waypoint_metas.append({"transport": mode, "label": geo_results[i + 1]["name"]})
 
@@ -207,22 +211,26 @@ class TextMode(BaseMode):
 
         # 6.5) 调高德 place_around 拉 POI (中心点 + radius_m)
         if self.amap.enabled():
+            # 切片中心是 WGS84, 高德 place_around 要 GCJ-02, 转回再传
             center_lng, center_lat = slice_info["center"]
+            center_gcj = wgs84_to_gcj02(center_lng, center_lat)
             for types_filter, label in [("110000", "scenic"), ("050000", "food"),
                                           ("060000", "shop"), ("080000", "life")]:
-                pois = self.amap.place_around((center_lng, center_lat),
+                pois = self.amap.place_around(center_gcj,
                                               radius=self.tile_radius_m,
                                               types=types_filter)
                 for poi in pois[:5]:  # 每类最多 5 个
                     cat_main = poi["type"].split(";")[0] if poi["type"] else "其他"
                     cat = POI_CATEGORY.get(cat_main, "other")
+                    # 高德返回 GCJ-02, 存 WGS84 (跟 grid/bbox 同系, 投影直接用)
+                    poi_lng, poi_lat = gcj02_to_wgs84(poi["location"][0], poi["location"][1])
                     p.pois.append(POI(
                         name=poi["name"],
                         type=poi["type"],
                         category=cat,
                         address=poi["address"],
-                        lng=poi["location"][0],
-                        lat=poi["location"][1],
+                        lng=poi_lng,
+                        lat=poi_lat,
                         distance=poi["distance"],
                     ))
             # 把 POI 投影到 grid
@@ -251,10 +259,14 @@ class TextMode(BaseMode):
                   f"start=({sx},{sy}) end=({ex},{ey}) "
                   f"{tm.distance_m/1000:.1f}km / {tm.duration_sec:.0f}s")
         # path 投影: walking_pts 优先 (街道级, 不会被 transit 端点污染)
+        # 路线贴路: 统一用切片 bbox 投影 (跟 grid 同系; 旧代码用 path 自身
+        # bounds 投影, 跟 grid 的切片 bbox 对不上, 路会整体偏), 再沿 OSM
+        # 路中心线加密 + 吸附, 不直线横切进湖/穿楼
         path_source = walking_pts if walking_pts else all_waypoints_px
-        path_bounds = compute_bounds(path_source)
-        path_waypoints_grid = points_to_grid(path_source, path_bounds, (p.map.width, p.map.height))
-        print(f"[text] Path 投影: {len(path_source)} -> {len(path_waypoints_grid)} grid points")
+        path_waypoints_grid = densify_and_snap_route(
+            path_source, parsed_osm.get("roads", []), bbox,
+            (p.map.width, p.map.height))
+        print(f"[text] Path 投影(贴路): {len(path_source)} -> {len(path_waypoints_grid)} grid points")
 
         if parsed_osm["roads"] or parsed_osm["buildings"]:
             # 用 OSM 真实数据 (P1.2: 多了 building_heights)

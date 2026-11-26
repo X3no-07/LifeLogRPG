@@ -53,7 +53,7 @@ class OsmClient:
     def build_bbox_query(bbox: Tuple[float, float, float, float],
                          timeout: int = 30) -> str:
         """bbox: (min_lat, min_lng, max_lat, max_lng)
-        拉路网/建筑/水系/绿化, Overpass QL 语法
+        拉路网/建筑/水系/绿化/地面, Overpass QL 语法
         """
         min_lat, min_lng, max_lat, max_lng = bbox
         bbox_str = f"{min_lat},{min_lng},{max_lat},{max_lng}"
@@ -62,11 +62,17 @@ class OsmClient:
             f"(\n"
             f"  way[\"highway\"]({bbox_str});\n"
             f"  way[\"building\"]({bbox_str});\n"
+            f"  way[\"building:part\"]({bbox_str});\n"
             f"  way[\"waterway\"]({bbox_str});\n"
             f"  way[\"natural\"=\"water\"]({bbox_str});\n"
             f"  way[\"leisure\"=\"park\"]({bbox_str});\n"
             f"  way[\"landuse\"=\"grass\"]({bbox_str});\n"
             f"  way[\"landuse\"=\"forest\"]({bbox_str});\n"
+            f"  way[\"landuse\"]({bbox_str});\n"
+            f"  way[\"leisure\"]({bbox_str});\n"
+            f"  way[\"natural\"]({bbox_str});\n"
+            f"  way[\"amenity\"=\"parking\"]({bbox_str});\n"
+            f"  way[\"highway\"=\"pedestrian\"]({bbox_str});\n"
             f");\n"
             f"out body;\n"
             f">;\n"
@@ -114,12 +120,17 @@ def parse_overpass(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     {
       "roads":    [{highway_type, nodes: [(lat, lng), ...]}, ...],
       "buildings":[{nodes: [(lat, lng), ...], building: 'yes'/'commercial'/..., levels: int,
-                    amenity/shop/office/tourism: 室内类别 (P1.3)}, ...],
+                    amenity/shop/office/tourism: 室内类别 (P1.3),
+                    part: True (仅 building:part 碎片, 如故宫中和殿)}, ...],
       "water":    [{nodes: [(lat, lng), ...]}, ...],
       "green":    [{nodes: [(lat, lng), ...], kind: 'park'/'grass'/'forest'}, ...],
+      "ground":   [{kind: 'grass'/'plaza'/'parking'/'dirt', nodes: [...]}, ...],
     }
     P1.2: building 加 levels 字段 (从 building:levels tag 提, 默认 1)
     P1.3: building 加 interior 字段 (amenity/shop/office/tourism 的简化分类)
+    building:part: 没有 building=yes 整栋、只有碎片的楼 (如故宫中和殿)
+    也算 building, 否则整栋缺失; part=True 标明是碎片。
+    ground: 地面类型 (只收闭合 area; 画底用, 替代默认全草地)
     """
     elements = raw.get("elements", [])
     # 1) 收集所有 node (lat, lon) -> 内部统一 (lng, lat) 跟高德 polyline 一致
@@ -133,6 +144,7 @@ def parse_overpass(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     buildings: List[Dict[str, Any]] = []
     water: List[Dict[str, Any]] = []
     green: List[Dict[str, Any]] = []
+    ground: List[Dict[str, Any]] = []
     for el in elements:
         if el.get("type") != "way":
             continue
@@ -145,13 +157,19 @@ def parse_overpass(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
                 coords.append(nodes_by_id[str(nid)])
         if len(coords) < 2:
             continue
+        # 闭合 area? (首尾同点, 或 area=yes)
+        is_area = (len(coords) >= 3 and coords[0] == coords[-1]) or tags.get("area") == "yes"
         if "highway" in tags:
             roads.append({
                 "highway_type": tags.get("highway", "unknown"),
                 "name": tags.get("name", ""),
                 "nodes": coords,
             })
-        elif "building" in tags:
+            # 闭合的人行道/步行区同时也是地面 (广场)
+            if is_area and (tags.get("highway") == "pedestrian" or
+                            (tags.get("highway") == "footway" and tags.get("area") == "yes")):
+                ground.append({"kind": "plaza", "name": tags.get("name", ""), "nodes": coords})
+        elif "building" in tags or "building:part" in tags:
             # P1.2: 提 building:levels, 默认 1
             levels_str = tags.get("building:levels", "1")
             try:
@@ -162,10 +180,11 @@ def parse_overpass(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
             # P1.3: 提室内类别 (amenity / shop / office / tourism 优先级递减)
             interior = _classify_interior(tags)
             buildings.append({
-                "building": tags.get("building", "yes"),
+                "building": tags.get("building", tags.get("building:part", "yes")),
                 "name": tags.get("name", ""),
                 "levels": levels,
                 "interior": interior,   # P1.3: {category, raw_tag} or None
+                "part": "building:part" in tags and "building" not in tags,
                 "nodes": coords,
             })
         elif "waterway" in tags or tags.get("natural") == "water":
@@ -174,13 +193,56 @@ def parse_overpass(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
                 "name": tags.get("name", ""),
                 "nodes": coords,
             })
-        elif tags.get("leisure") == "park" or tags.get("landuse") in ("grass", "forest"):
-            green.append({
-                "kind": tags.get("leisure") or tags.get("landuse", "park"),
-                "name": tags.get("name", ""),
-                "nodes": coords,
-            })
-    return {"roads": roads, "buildings": buildings, "water": water, "green": green}
+        else:
+            # 绿化 (原有行为) + 地面 (新增): 同一条 way 可以既是绿化又是地面
+            # (如 leisure=park: 树画在上面, 底是草)
+            if tags.get("leisure") == "park" or tags.get("landuse") in ("grass", "forest"):
+                green.append({
+                    "kind": tags.get("leisure") or tags.get("landuse", "park"),
+                    "name": tags.get("name", ""),
+                    "nodes": coords,
+                })
+            gkind = _classify_ground(tags, is_area)
+            if gkind is not None:
+                ground.append({
+                    "kind": gkind,
+                    "name": tags.get("name", ""),
+                    "nodes": coords,
+                })
+    return {"roads": roads, "buildings": buildings, "water": water,
+            "green": green, "ground": ground}
+
+
+# ----------------------------------------------------------------------------
+#  地面类型分类 (画底用): OSM tags -> grass/plaza/parking/dirt
+#  分法跟预览 export_ground.py 一致: 只有闭合 area 才算地面,
+#  楼和水不算, 线 (非 area 的路) 不算。
+# ----------------------------------------------------------------------------
+GROUND_GRASS_LANDUSE = {"grass", "meadow", "village_green", "recreation_ground"}
+GROUND_GRASS_LEISURE = {"park", "garden", "pitch", "playground", "common"}
+GROUND_GRASS_NATURAL = {"grassland", "scrub", "wood"}
+GROUND_DIRT_LANDUSE = {"construction", "brownfield"}
+GROUND_DIRT_NATURAL = {"sand", "bare_rock", "beach"}
+
+
+def _classify_ground(tags: Dict[str, str], is_area: bool) -> Optional[str]:
+    """一条 way 的地面类型, 不是地面返回 None。
+    注意: highway/building/water 的 way 不会走到这里 (上层已分流),
+    这里只处理 landuse/leisure/natural/amenity 类。
+    """
+    if not is_area:
+        return None  # 线不是地面
+    if tags.get("landuse") in GROUND_GRASS_LANDUSE \
+            or tags.get("leisure") in GROUND_GRASS_LEISURE \
+            or tags.get("natural") in GROUND_GRASS_NATURAL \
+            or tags.get("landuse") == "forest":
+        return "grass"
+    if tags.get("amenity") == "parking":
+        return "parking"
+    if tags.get("landuse") in GROUND_DIRT_LANDUSE \
+            or tags.get("natural") in GROUND_DIRT_NATURAL:
+        return "dirt"
+    return None
 
 
 # P1.3: 室内类别映射 (OSM tag value -> 简化 category)

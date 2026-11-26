@@ -32,8 +32,8 @@
   "bake": {
     "output_dir": "F:/LifeLogRPG_Project/saved_logs",
     "tile_size_px": 16,
-    "viewport_grid_w": 80,
-    "viewport_grid_h": 60,
+    "viewport_grid_w": 160,
+    "viewport_grid_h": 120,
     "default_city": "北京",
     "default_walk_speed_px_per_sec": 60.0,
     "default_bike_speed_px_per_sec": 180.0,

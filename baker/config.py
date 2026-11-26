@@ -36,7 +36,7 @@ def _default_config() -> Dict[str, Any]:
         },
         "bake": {
             "output_dir": str(PROJECT_ROOT / "saved_logs"),
-            "tile_size_px": 16, "viewport_grid_w": 80, "viewport_grid_h": 60,
+            "tile_size_px": 16, "viewport_grid_w": 160, "viewport_grid_h": 120,
             "default_city": "北京", "weather_seed": 42,
         },
         "playback": {"default_speed": 1.0, "min_speed": 0.25, "max_speed": 8.0},

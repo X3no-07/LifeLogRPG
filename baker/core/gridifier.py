@@ -6,8 +6,11 @@
 - Bresenham 画线连接端点
 - 自动点缀 tree / building 让地图不空
 """
+import math
 import random
 from typing import List, Tuple, Dict, Any
+
+from PIL import Image, ImageDraw
 
 # Type aliases
 Point = Tuple[float, float]   # (lng, lat)  (高德坐标系, lng 在前)
@@ -170,57 +173,85 @@ def osm_to_grid(parsed_osm: Dict[str, List[Dict[str, Any]]],
                 grid_size: Tuple[int, int],
                 path_overlay_waypoints: List[Dict[str, int]] = None
                 ) -> Tuple[Grid, List[List[int]], Dict[str, Any]]:
-    """OSM 数据 → grid
+    """OSM 数据 → grid (PIL 快栅格化)
     bbox: (min_lat, min_lng, max_lat, max_lng)
     grid_size: (w, h)
 
     返回: (grid, building_heights, debug_info)
       - grid[y][x] = cell type
       - building_heights[y][x] = 建筑层数 (0=无, 1-20=几层, P1.2)
-      - debug_info: {road_count, building_count, water_count, green_count, cell_counts}
+      - debug_info: {road_count, building_count, water_count, green_count,
+                     ground_count, cell_counts}
+
+    栅格化用 PIL (ImageDraw.polygon/line, C 速度): 旧的逐点
+    point-in-polygon 是 O(楼数×行×列), 320×240 下要 1 小时;
+    PIL 直接填多边形, 同样数据 <1 秒。几何跟旧版一致, 边缘像素
+    可能差一格 (参考预览 build_hires.py)。
 
     绘制顺序 (覆盖优先级, 后面覆盖前面):
-      1. green  (公园/森林) - cell 4
-      2. water  (河流/湖)   - cell 3
-      3. building (建筑轮廓) - cell 2
-      4. road (路网)        - cell 1 (按 highway type 不同宽度)
-      5. path overlay (用户走过的路径) - cell 1 (覆盖在 road 上面)
-      6. sidewalk (路两边 1 像素人行道) - cell 5
-      7. POI (4x4 大块)    - cell 6
+      0. 底: parsed 有 ground 数据时默认铺装 (CELL_PLAZA),
+         否则草地 (CELL_GRASS, 兼容旧调用)
+      1. ground (地面类型: 裸土/停车场/广场/草地; 草最后画, 平局草赢)
+      2. green  (公园/森林) - cell 4
+      3. water  (河流/湖; 闭合填面, 开放画线宽 2, 不再把整条河填成湖) - cell 3
+      4. road (路网; PIL 线, 宽按 highway type; 画在水上, 过河是桥) - cell 1
+      5. building (建筑轮廓; 楼后画, 路不再切楼; 层数同步写 heights) - cell 2
+      6. path overlay (用户走过的路径) - cell 1
     """
     w, h = grid_size
-    grid: Grid = [[CELL_GRASS for _ in range(w)] for _ in range(h)]
-    # P1.2: 建筑层数 (跟 grid 同步, 默认 0)
-    building_heights: List[List[int]] = [[0 for _ in range(w)] for _ in range(h)]
+    base = CELL_PLAZA if "ground" in parsed_osm else CELL_GRASS
+    grid_img = Image.new("L", (w, h), base)
+    heights_img = Image.new("L", (w, h), 0)
+    dr = ImageDraw.Draw(grid_img)
+    hd = ImageDraw.Draw(heights_img)
 
-    # 1) green (优先画, 后面会被覆盖)
+    # 1) ground (只有 parse_overpass 给了 ground 数据时才有)
+    #    画的顺序: dirt, parking, plaza, grass (草最后, 平局草赢)
+    ground = parsed_osm.get("ground", [])
+    for kind in ("dirt", "parking", "plaza", "grass"):
+        val = CELL_GRASS if kind == "grass" else CELL_PLAZA
+        for g in ground:
+            if g.get("kind") != kind:
+                continue
+            pts = _project_floats(g["nodes"], bbox, grid_size)
+            _pil_poly(dr, pts, val)
+
+    # 2) green
     for g in parsed_osm.get("green", []):
-        _draw_polygon(grid, g["nodes"], bbox, grid_size, CELL_TREE, fill=True)
+        pts = _project_floats(g["nodes"], bbox, grid_size)
+        _pil_poly(dr, pts, CELL_TREE, line_width=1)
 
-    # 2) water
+    # 3) water: 闭合填面, 开放画线 (宽 2)
     for w_seg in parsed_osm.get("water", []):
-        _draw_polygon(grid, w_seg["nodes"], bbox, grid_size, CELL_WATER, fill=True)
+        pts = _project_floats(w_seg["nodes"], bbox, grid_size)
+        if _is_closed_poly(w_seg["nodes"]):
+            _pil_poly(dr, pts, CELL_WATER)
+        else:
+            _pil_line(dr, pts, CELL_WATER, width=2)
 
-    # 3) building (P1.2: 同时写 heights)
-    for b in parsed_osm.get("buildings", []):
-        levels = b.get("levels", 1)
-        _draw_polygon(grid, b["nodes"], bbox, grid_size, CELL_BUILDING, fill=True)
-        _stamp_building_heights(building_heights, b["nodes"], bbox, grid_size, levels)
-
-    # 4) road (按 highway_type 宽度)
+    # 4) road (PIL 线, 宽按 highway type; 全画, 不滤, 路网不断)
     for r in parsed_osm.get("roads", []):
+        pts = _project_floats(r["nodes"], bbox, grid_size)
         width = HIGHWAY_WIDTH.get(r["highway_type"], 1)
-        _draw_polyline_thick(grid, r["nodes"], bbox, grid_size, CELL_ROAD, thickness=width)
+        _pil_line(dr, pts, CELL_ROAD, width=width)
 
-    # 5) path overlay (用户走过的路径)
+    # 5) building (楼后画) + heights (层数小的先画, 大的后画, 取 max)
+    buildings = parsed_osm.get("buildings", [])
+    for b in buildings:
+        pts = _project_floats(b["nodes"], bbox, grid_size)
+        _pil_poly(dr, pts, CELL_BUILDING, line_width=1)
+    for b in sorted(buildings, key=lambda b: b.get("levels", 1)):
+        levels = max(1, min(20, int(b.get("levels", 1))))
+        pts = _project_floats(b["nodes"], bbox, grid_size)
+        _pil_poly(hd, pts, levels, line_width=1)
+
+    # 6) path overlay (用户走过的路径)
     if path_overlay_waypoints:
-        for i in range(len(path_overlay_waypoints) - 1):
-            ax, ay = path_overlay_waypoints[i]["x"], path_overlay_waypoints[i]["y"]
-            bx, by = path_overlay_waypoints[i + 1]["x"], path_overlay_waypoints[i + 1]["y"]
-            bresenham_line(grid, ax, ay, bx, by, CELL_ROAD)
+        pts = [(p["x"], p["y"]) for p in path_overlay_waypoints]
+        _pil_line(dr, pts, CELL_ROAD, width=3)
 
-    # 6) sidewalk: road cell 周围 1 像素填 grass→sidewalk (已经画完 road 后)
-    # 简化: 不做, 留给 P0.3
+    grid = [[grid_img.getpixel((x, y)) for x in range(w)] for y in range(h)]
+    building_heights = [[heights_img.getpixel((x, y)) for x in range(w)] for y in range(h)]
 
     # debug info
     counts = _count_cells(grid)
@@ -229,9 +260,180 @@ def osm_to_grid(parsed_osm: Dict[str, List[Dict[str, Any]]],
         "building_count": len(parsed_osm.get("buildings", [])),
         "water_count": len(parsed_osm.get("water", [])),
         "green_count": len(parsed_osm.get("green", [])),
+        "ground_count": len(parsed_osm.get("ground", [])),
         "cell_counts": counts,
     }
     return grid, building_heights, debug_info
+
+
+# ----------------------------------------------------------------------------
+#  PIL 快栅格化 helpers (osm_to_grid 用; 旧的 _draw_polygon/_scanline_fill/
+#  _stamp_building_heights 留着, 测试直接调它们, 别删)
+# ----------------------------------------------------------------------------
+
+def _project_floats(nodes: List[Tuple[float, float]],
+                    bbox: Tuple[float, float, float, float],
+                    grid_size: Tuple[int, int]) -> List[Tuple[float, float]]:
+    """[(lng, lat), ...] WGS84 -> [(fx, fy), ...] 浮点 grid 坐标 (不 clamp,
+    PIL 自己裁出界的部分)。bbox: (min_lat, min_lng, max_lat, max_lng)"""
+    min_lat, min_lng, max_lat, max_lng = bbox
+    gw, gh = grid_size
+    if max_lat == min_lat or max_lng == min_lng:
+        return [(0.0, 0.0) for _ in nodes]
+    out = []
+    for lng, lat in nodes:
+        fx = (lng - min_lng) / (max_lng - min_lng) * gw
+        fy = (1.0 - (lat - min_lat) / (max_lat - min_lat)) * gh
+        out.append((fx, fy))
+    return out
+
+
+def _is_closed_poly(nodes: List[Tuple[float, float]]) -> bool:
+    """way 是否闭合 (首尾同点)。OSM 闭合 way 会重复首节点 id,
+    转成坐标后首尾 float 完全相等。"""
+    return len(nodes) >= 3 and nodes[0] == nodes[-1]
+
+
+def _pil_poly(dr, pts: List[Tuple[float, float]], fill: int,
+              line_width: int = 1) -> None:
+    """PIL 画多边形: >=3 点填面, 2 点画线, 1 点画点。"""
+    if not pts:
+        return
+    if len(pts) >= 3:
+        dr.polygon(pts, fill=fill)
+    elif len(pts) == 2:
+        dr.line(pts, fill=fill, width=line_width)
+    else:
+        dr.point(pts[0], fill=fill)
+
+
+def _pil_line(dr, pts: List[Tuple[float, float]], fill: int, width: int = 1) -> None:
+    """PIL 画折线: >=2 点画线, 1 点画点。"""
+    if not pts:
+        return
+    if len(pts) >= 2:
+        dr.line(pts, fill=fill, width=max(1, int(width)))
+    else:
+        dr.point(pts[0], fill=fill)
+
+
+# ----------------------------------------------------------------------------
+#  路线贴路: Amap 稀疏点 -> 沿 OSM 路中心线加密 + 吸附
+# ----------------------------------------------------------------------------
+
+def densify_and_snap_route(route_pts_lnglat: List[Tuple[float, float]],
+                           osm_roads: List[Dict[str, Any]],
+                           bbox: Tuple[float, float, float, float],
+                           grid_size: Tuple[int, int],
+                           max_gap_cells: float = 2.0,
+                           snap_radius_cells: float = 3.0,
+                           ) -> List[Dict[str, int]]:
+    """Amap 路线点 -> 加密 + 贴到 OSM 路中心线 -> grid waypoints。
+
+    解决两个毛病:
+    1. 投影错位: 旧代码用 path 自身 bounds 投影, 跟 grid 的切片 bbox
+       对不上, 路会整体偏。改成统一用切片 bbox 投影 (跟 grid 一致)。
+    2. 直线横切: Amap 点稀疏, 直线连起来会切进湖、穿过楼。先沿
+       Amap 折线加密到每段 <= max_gap_cells, 再把每点吸附到最近的
+       OSM 路中心线上 (snap_radius 内), 贴着路的弯曲走。
+
+    route_pts_lnglat: [(lng, lat), ...] WGS84 (Amap polyline 转来的点)
+    osm_roads: parsed_osm["roads"] (nodes 为 (lng, lat)); 为空时只加密不吸附
+    bbox: 切片 bbox (min_lat, min_lng, max_lat, max_lng), 跟 grid 同系
+    返回: [{"x": int, "y": int}, ...] 去重连续点 (跟 points_to_grid 同格式)
+
+    吸附带连续性偏好: 上一点吸附到的那条路, 只要还在半径内就优先用,
+    避免在两条平行路之间来回跳。
+    """
+    w, h = grid_size
+    if not route_pts_lnglat:
+        return []
+    if len(route_pts_lnglat) < 2:
+        gx, gy = _lnglat_to_grid_xy(route_pts_lnglat[0][0], route_pts_lnglat[0][1],
+                                     bbox, grid_size)
+        return [{"x": gx, "y": gy}]
+
+    # 1) 投影到浮点 grid 坐标
+    fpts = _project_floats(route_pts_lnglat, bbox, grid_size)
+
+    # 2) 沿折线加密到每段 <= max_gap_cells
+    dense: List[Tuple[float, float]] = [fpts[0]]
+    for a, b in zip(fpts, fpts[1:]):
+        seg_len = math.hypot(b[0] - a[0], b[1] - a[1])
+        n = max(1, int(math.ceil(seg_len / max_gap_cells)))
+        for k in range(1, n + 1):
+            t = k / n
+            dense.append((a[0] + (b[0] - a[0]) * t,
+                          a[1] + (b[1] - a[1]) * t))
+
+    # 3) OSM 路段预过滤: 只留路线包围盒附近的段 (扩大 snap_radius)
+    road_segs: List[Tuple[float, float, float, float, int]] = []  # ax,ay,bx,by,road_idx
+    if osm_roads:
+        xs = [p[0] for p in dense]
+        ys = [p[1] for p in dense]
+        pad = snap_radius_cells + 1.0
+        rx0, rx1 = min(xs) - pad, max(xs) + pad
+        ry0, ry1 = min(ys) - pad, max(ys) + pad
+        for ridx, r in enumerate(osm_roads):
+            rpts = _project_floats(r.get("nodes", []), bbox, grid_size)
+            for i in range(len(rpts) - 1):
+                ax, ay = rpts[i]
+                bx, by = rpts[i + 1]
+                # 段包围盒跟路线包围盒相交才留
+                if max(ax, bx) < rx0 or min(ax, bx) > rx1:
+                    continue
+                if max(ay, by) < ry0 or min(ay, by) > ry1:
+                    continue
+                road_segs.append((ax, ay, bx, by, ridx))
+
+    # 4) 吸附
+    snapped: List[Tuple[float, float]] = []
+    cur_road: int = -1  # 上一点吸附到的路 (连续性偏好)
+    for (px, py) in dense:
+        best = None  # (dist, cx, cy, road_idx)
+        if road_segs:
+            # 先试上一点那条路 (在半径内就优先用, 不跳路)
+            if cur_road >= 0:
+                for (ax, ay, bx, by, ridx) in road_segs:
+                    if ridx != cur_road:
+                        continue
+                    d, cx, cy = _seg_closest(px, py, ax, ay, bx, by)
+                    if d <= snap_radius_cells and (best is None or d < best[0]):
+                        best = (d, cx, cy, ridx)
+            # 再找全局最近
+            if best is None:
+                for (ax, ay, bx, by, ridx) in road_segs:
+                    d, cx, cy = _seg_closest(px, py, ax, ay, bx, by)
+                    if d <= snap_radius_cells and (best is None or d < best[0]):
+                        best = (d, cx, cy, ridx)
+        if best is not None:
+            snapped.append((best[1], best[2]))
+            cur_road = best[3]
+        else:
+            snapped.append((px, py))
+            cur_road = -1
+
+    # 5) 转整数 grid, clamp, 去重连续点
+    out: List[Dict[str, int]] = []
+    for (fx, fy) in snapped:
+        gx = max(0, min(w - 1, int(fx)))
+        gy = max(0, min(h - 1, int(fy)))
+        if not out or out[-1] != {"x": gx, "y": gy}:
+            out.append({"x": gx, "y": gy})
+    return out
+
+
+def _seg_closest(px: float, py: float, ax: float, ay: float,
+                 bx: float, by: float) -> Tuple[float, float, float]:
+    """点到线段的最近距离 + 最近点。返回 (dist, cx, cy)。"""
+    vx, vy = bx - ax, by - ay
+    wx, wy = px - ax, py - ay
+    s2 = vx * vx + vy * vy
+    if s2 == 0:
+        return math.hypot(wx, wy), ax, ay
+    t = max(0.0, min(1.0, (wx * vx + wy * vy) / s2))
+    cx, cy = ax + t * vx, ay + t * vy
+    return math.hypot(px - cx, py - cy), cx, cy
 
 
 def _stamp_building_heights(heights: List[List[int]],

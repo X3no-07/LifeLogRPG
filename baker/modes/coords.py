@@ -9,9 +9,10 @@ import sys
 from typing import List, Tuple, Optional, Dict, Any
 
 from ..core.gridifier import (
-    points_to_grid, build_grid_from_waypoints, compute_bounds, osm_to_grid,
-    polyline_to_points, approx_distance_km,
+    build_grid_from_waypoints, osm_to_grid,
+    polyline_to_points, approx_distance_km, densify_and_snap_route,
 )
+from ..core.gcj02 import gcj02_to_wgs84, wgs84_to_gcj02, gcj02_to_wgs84_points
 from ..core.tiling import slice_around_path, lnglat_to_grid_cell
 from ..core.schema import Waypoint, Dialog, POI, TransitMarker, InteriorSlot
 from ..clients.osm import OsmClient, parse_overpass
@@ -51,6 +52,10 @@ class CoordsMode(BaseMode):
             print("[coords] 至少 2 个坐标点")
             sys.exit(2)
 
+        # 用户给的坐标按 GCJ-02 理解 (高德 route 入参就要求 GCJ-02, 原有约定):
+        # API 调用直接用 self.coords, 切片/投影一律用转成 WGS84 的 coords_wgs
+        coords_wgs = [gcj02_to_wgs84(lng, lat) for lng, lat in self.coords]
+
         # P0.4: 调高德 route 拿真实路 polyline, 拆分 walking_pts vs transit_markers
         all_route_points: List[Tuple[float, float]] = []
         walking_pts: List[Tuple[float, float]] = []
@@ -58,15 +63,17 @@ class CoordsMode(BaseMode):
         seg_modes: List[str] = []
 
         for i in range(len(self.coords) - 1):
-            a = self.coords[i]
+            a = self.coords[i]          # GCJ-02: 给高德 route 用
             b = self.coords[i + 1]
+            aw = coords_wgs[i]          # WGS84: 切片/投影用
+            bw = coords_wgs[i + 1]
             approx_km = approx_distance_km(a, b)
             if approx_km < 0.05:
                 # 太近, 直接连
-                all_route_points.append(a)
-                all_route_points.append(b)
-                walking_pts.append(a)
-                walking_pts.append(b)
+                all_route_points.append(aw)
+                all_route_points.append(bw)
+                walking_pts.append(aw)
+                walking_pts.append(bw)
                 seg_durations.append(30.0)
                 seg_modes.append("walking")
                 continue
@@ -75,33 +82,34 @@ class CoordsMode(BaseMode):
             route = self.amap.route(a, b, mode=mode)
             seg_modes.append(mode)
             if route and route.get("polyline"):
-                pts = polyline_to_points(route["polyline"])
+                # polyline 是 GCJ-02, 先转 WGS84 再进管线
+                pts = gcj02_to_wgs84_points(polyline_to_points(route["polyline"]))
                 all_route_points.extend(pts)
                 seg_durations.append(route.get("duration", 60.0))
                 if mode in ("walking", "bicycling"):
                     walking_pts.extend(pts)
                 else:
-                    # driving: 不入 walking_pts, 记 transit_marker
-                    all_route_points.append(a)
-                    all_route_points.append(b)
+                    # driving: 不入 walking_pts, 记 transit_marker (存 WGS84)
+                    all_route_points.append(aw)
+                    all_route_points.append(bw)
                     p.transit_markers.append(TransitMarker(
                         name=f"pt_{i + 1}",
                         transport="driving",
-                        start_lng=a[0], start_lat=a[1],
-                        end_lng=b[0], end_lat=b[1],
+                        start_lng=aw[0], start_lat=aw[1],
+                        end_lng=bw[0], end_lat=bw[1],
                         distance_m=route.get("distance", 0.0),
                         duration_sec=route.get("duration", 0.0),
                     ))
                 print(f"[coords]   {a} -> {b} ({approx_km:.1f}km, {mode}): "
                       f"{len(pts)} polyline pts, {route.get('duration', 0):.0f}s")
             else:
-                all_route_points.append(a)
-                all_route_points.append(b)
-                walking_pts.append(a)
-                walking_pts.append(b)
+                all_route_points.append(aw)
+                all_route_points.append(bw)
+                walking_pts.append(aw)
+                walking_pts.append(bw)
                 seg_durations.append(60.0)
                 print(f"[coords]   {a} -> {b} ({approx_km:.1f}km): route 失败, 用直线")
-        all_route_points.append(self.coords[-1])
+        all_route_points.append(coords_wgs[-1])
 
         # P0.4 自适应切片: 只在 walking_pts 段切片
         # fallback: walking_pts 为空时 (纯 driving/transit), slice 第一个 coord
@@ -109,7 +117,7 @@ class CoordsMode(BaseMode):
             slice_path = walking_pts
         elif self.coords:
             # 用第一个点为中心, 半径 radius_m 切
-            first_lng, first_lat = self.coords[0]
+            first_lng, first_lat = coords_wgs[0]
             slice_path = [(first_lng, first_lat)]
         else:
             slice_path = all_route_points
@@ -132,19 +140,23 @@ class CoordsMode(BaseMode):
 
         # P0.3: 调高德 place_around 拉 POI
         if self.amap.enabled():
+            # 切片中心是 WGS84, 高德 place_around 要 GCJ-02, 转回再传
             center_lng, center_lat = slice_info["center"]
+            center_gcj = wgs84_to_gcj02(center_lng, center_lat)
             for types_filter, label in [("110000", "scenic"), ("050000", "food"),
                                           ("060000", "shop"), ("080000", "life")]:
-                pois = self.amap.place_around((center_lng, center_lat),
+                pois = self.amap.place_around(center_gcj,
                                               radius=self.tile_radius_m,
                                               types=types_filter)
                 for poi in pois[:5]:
                     cat_main = poi["type"].split(";")[0] if poi["type"] else "其他"
                     cat = POI_CATEGORY.get(cat_main, "other")
+                    # 高德返回 GCJ-02, 存 WGS84 (跟 grid/bbox 同系, 投影直接用)
+                    poi_lng, poi_lat = gcj02_to_wgs84(poi["location"][0], poi["location"][1])
                     p.pois.append(POI(
                         name=poi["name"], type=poi["type"], category=cat,
                         address=poi["address"],
-                        lng=poi["location"][0], lat=poi["location"][1],
+                        lng=poi_lng, lat=poi_lat,
                         distance=poi["distance"],
                     ))
             for poi in p.pois:
@@ -168,11 +180,14 @@ class CoordsMode(BaseMode):
                   f"{tm.distance_m/1000:.1f}km / {tm.duration_sec:.0f}s")
 
         # 路径投影: 用 walking_pts (避免 transit 端点污染)
+        # 路线贴路: 统一用切片 bbox 投影 (跟 grid 同系), 再沿 OSM 路中心线
+        # 加密 + 吸附, 不直线横切进湖/穿楼
         if walking_pts:
             path_source = walking_pts
-            path_bounds = compute_bounds(path_source)
-            path_waypoints_grid = points_to_grid(path_source, path_bounds, (p.map.width, p.map.height))
-            print(f"[coords] Path 投影: {len(path_source)} -> {len(path_waypoints_grid)} grid points")
+            path_waypoints_grid = densify_and_snap_route(
+                path_source, parsed_osm.get("roads", []), bbox,
+                (p.map.width, p.map.height))
+            print(f"[coords] Path 投影(贴路): {len(path_source)} -> {len(path_waypoints_grid)} grid points")
         else:
             # 全 driving/transit: 无 street-level path, 用单点 placeholder
             path_waypoints_grid = []

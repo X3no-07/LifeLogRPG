@@ -37,8 +37,8 @@ class Meta:
 @dataclass
 class MapData:
     tile_size: int = 16            # 每格像素 (P0: 16)
-    width: int = 80                # 网格列数
-    height: int = 60               # 网格行数
+    width: int = 160               # 网格列数
+    height: int = 120              # 网格行数
     # grid[y][x] = int 类型码: 0=grass 1=road 2=building 3=water 4=tree 5=sidewalk 6=poi 7=plaza
     grid: List[List[int]] = field(default_factory=list)
     # P1.2 建筑层数 (跟 grid 同步, 0=无建筑, N=N 层)
@@ -100,8 +100,8 @@ class POI:
     type: str = ""                 # "风景名胜;风景名胜;国家级景点"
     category: str = ""             # 简化分类: 餐饮/购物/景点/生活/其他
     address: str = ""             # "北京市东城区..."
-    lng: float = 0.0
-    lat: float = 0.0
+    lng: float = 0.0              # WGS84 (高德返回的 GCJ-02 由 modes 层转换后存入)
+    lat: float = 0.0              # WGS84
     grid_x: int = 0               # 投影到 grid 坐标
     grid_y: int = 0
     distance: int = 0             # 离中心点的米数
@@ -119,10 +119,10 @@ class TransitMarker:
     """
     name: str = ""                # 终点 label (e.g. "西二旗")
     transport: str = "transit"    # transit / driving / bicycling
-    # 起点 (lng, lat) - 上一段 walking 终点 / 上一个坐标
+    # 起点 (lng, lat, WGS84) - 上一段 walking 终点 / 上一个坐标
     start_lng: float = 0.0
     start_lat: float = 0.0
-    # 终点 (lng, lat) - 实际到达地
+    # 终点 (lng, lat, WGS84) - 实际到达地
     end_lng: float = 0.0
     end_lat: float = 0.0
     # 投影到 grid (可能裁剪到边缘, 也可能直接绘到 overlay)
@@ -147,8 +147,8 @@ class InteriorSlot:
     name: str = ""                # OSM name tag (e.g. "星巴克咖啡")
     category: str = ""            # 简化分类: cafe / restaurant / shop / office / hotel / hospital / bank / school / museum / pharmacy / other
     raw_tag: str = ""             # 原始 OSM tag 值 (e.g. "amenity=cafe")
-    lng: float = 0.0
-    lat: float = 0.0
+    lng: float = 0.0              # WGS84 (OSM 原生)
+    lat: float = 0.0              # WGS84
     grid_x: int = 0
     grid_y: int = 0
     # 用于 P1.4 QA: 是否有名字 (没名字可能不重要)

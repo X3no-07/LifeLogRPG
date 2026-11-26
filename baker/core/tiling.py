@@ -13,7 +13,8 @@
 坐标系统:
 - OSM 用 WGS84 (lat, lng)
 - 高德用 GCJ-02 (lat, lng, 加密, 中国境内偏移 50-500m)
-- 简化方案: 局部切片接受 ~500m 误差 (二者差异在城市内)
+- 本模块统一按 WGS84 工作: 高德来的点由 modes 层经 baker/core/gcj02.py
+  (eviltransform) 转成 WGS84 再传入; 只有调高德 API 本身时才用 GCJ-02
 """
 import math
 from typing import List, Tuple
