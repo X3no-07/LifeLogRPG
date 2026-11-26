@@ -356,3 +356,93 @@ class TestRouteAlongRoadsIntegration:
         apply_path_overlay(grid, route)
         for p in route:
             assert grid[p["y"]][p["x"]] == CELL_ROAD
+
+
+class TestWaterProximityMask:
+    def test_mask_covers_water_line(self):
+        from baker.core.gridifier import _water_proximity_mask
+        water = [{"nodes": [(0.0, 0.5), (1.0, 0.5)], "type": "river"}]
+        mask = _water_proximity_mask(water, (0.0, 0.0, 1.0, 1.0), (10, 10), radius=1)
+        # 水线在 lat=0.5 -> y=5 行附近, 半径 1 -> y=4,5,6 行
+        assert (5, 5) in mask
+        assert (0, 5) in mask and (9, 5) in mask
+        assert (5, 4) in mask and (5, 6) in mask
+        assert (5, 0) not in mask and (5, 9) not in mask
+
+    def test_empty_water_empty_mask(self):
+        from baker.core.gridifier import _water_proximity_mask
+        assert _water_proximity_mask([], (0.0, 0.0, 1.0, 1.0), (10, 10)) == set()
+        assert _water_proximity_mask(None, (0.0, 0.0, 1.0, 1.0), (10, 10)) == set()
+
+
+class TestFindPathWaterPenalty:
+    def test_prefers_road_away_from_water(self):
+        # 3 行宽的路 (y=4,5,6), 水线在 y=8: 贴水边的 y=6 行加价,
+        # 路线应从 y=6 让到 y=5 (路 1+2=3 仍比草 4 便宜, 不离路去走草)
+        from baker.core.gridifier import _water_proximity_mask
+        g = _grid("....................",
+                  "....................",
+                  "....................",
+                  "....................",
+                  "rrrrrrrrrrrrrrrrrrrr",
+                  "rrrrrrrrrrrrrrrrrrrr",
+                  "rrrrrrrrrrrrrrrrrrrr",
+                  "....................",
+                  "....................",
+                  "....................")
+        bbox = (0.0, 0.0, 1.0, 1.0)
+        water = [{"nodes": [(0.0, 0.2), (1.0, 0.2)], "type": "river"}]
+        wmask = _water_proximity_mask(water, bbox, (20, 10), radius=2)
+        assert (6, 6) in wmask and (5, 5) not in wmask
+        path = find_path_on_grid(g, (0, 6), (19, 6), water_mask=wmask)
+        assert path[0] == (0, 6) and path[-1] == (19, 6)
+        # 中间点都让到离水远的行 (y<=5), 不贴着水边走
+        assert all(y <= 5 for _, y in path[1:-1]), path
+        assert all(_route_cell_cost(g[y][x]) is not None for x, y in path)
+
+    def test_bridge_crossing_still_works(self):
+        # 竖河 (x=9,10 全高是水) + 横桥 (y=5 是路): 桥是唯一过河处,
+        # 贴水加价也不能让路线绕开, 必须走桥过去, 且走桥心
+        from baker.core.gridifier import _water_proximity_mask
+        rows = []
+        for y in range(10):
+            row = ["."] * 20
+            for x in range(20):
+                row[x] = "r" if y == 5 else row[x]
+            if y != 5:
+                row[9] = "w"
+                row[10] = "w"
+            rows.append("".join(row))
+        g = _grid(*rows)
+        bbox = (0.0, 0.0, 1.0, 1.0)
+        water = [{"nodes": [(0.475, 0.0), (0.475, 1.0)], "type": "river"}]
+        wmask = _water_proximity_mask(water, bbox, (20, 10), radius=2)
+        path = find_path_on_grid(g, (0, 5), (19, 5), water_mask=wmask)
+        assert path[0] == (0, 5) and path[-1] == (19, 5)
+        # 走桥过去, 不绕河端 (河贯通全高, 也绕不过去)
+        assert (9, 5) in path and (10, 5) in path
+        assert all(_route_cell_cost(g[y][x]) is not None for x, y in path)
+
+
+class TestRouteAlongRoadsWater:
+    def test_osm_water_shifts_route_off_water_edge(self):
+        # route_along_roads 接 osm_water: 3 行宽的路 + 南边水线,
+        # 加密后的路点中间段应让到离水远的行
+        g = _grid("....................",
+                  "....................",
+                  "....................",
+                  "....................",
+                  "rrrrrrrrrrrrrrrrrrrr",
+                  "rrrrrrrrrrrrrrrrrrrr",
+                  "rrrrrrrrrrrrrrrrrrrr",
+                  "....................",
+                  "....................",
+                  "....................")
+        bbox = (0.0, 0.0, 1.0, 1.0)
+        water = [{"nodes": [(0.0, 0.2), (1.0, 0.2)], "type": "river"}]
+        # 锚点 (lng, lat): y=6 行两端
+        route = route_along_roads([(0.05, 0.4), (0.95, 0.4)], g, bbox, (20, 10),
+                                  osm_water=water)
+        assert len(route) >= 2
+        assert route[0] == {"x": 1, "y": 6} and route[-1] == {"x": 19, "y": 6}
+        assert all(p["y"] <= 5 for p in route[1:-1]), route

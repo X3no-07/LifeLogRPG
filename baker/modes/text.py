@@ -272,7 +272,8 @@ class TextMode(BaseMode):
             )
             path_waypoints_grid = route_along_roads(
                 path_source, grid, bbox, (p.map.width, p.map.height),
-                osm_roads=parsed_osm.get("roads", []))
+                osm_roads=parsed_osm.get("roads", []),
+                osm_water=parsed_osm.get("water", []))
             # 门洞/桥处短暂穿墙的格子刻成路 (真实走道, 只是被楼盖住了)
             n_carved = carve_route_passages(grid, path_waypoints_grid, building_heights)
             if n_carved:

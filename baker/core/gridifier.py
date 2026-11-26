@@ -513,16 +513,46 @@ def _road_proximity_mask(osm_roads: List[Dict[str, Any]],
     return {(x, y) for y in range(h) for x in range(w) if px[x, y] == 1}
 
 
+# 贴水边的代价: 可走格 (路/草/广场/树) 离 OSM 水线太近时加的代价。
+# 渲染器把河画成约 2 格宽的水带, 路线贴着水线走会在视觉上踩进水里
+# (天安门外金水桥: 路点离水线只有 0.6 格)。+2 让路 (1+2=3) 仍比
+# 草 (4) 便宜 (不逼路线离路去走草), 但会优先走离水远的路心、桥心。
+WATER_EDGE_PENALTY = 2.0
+
+
+def _water_proximity_mask(osm_water: List[Dict[str, Any]],
+                          bbox: Tuple[float, float, float, float],
+                          grid_size: Tuple[int, int],
+                          radius: int = 2) -> set:
+    """OSM 水线附近的格子集合 (半径 radius 格)。
+    水线是浮点坐标, 栅格化后的水格和水线本身能偏 ~1 格, 只避水格
+    不够: 路点可能踩在路格上、却离水线不到 1 格, 渲染出来就在水带里。
+    掩码画的是水线本身 (闭合水面只描边, 里面本来就是水格), 用来给
+    寻路加贴水边的代价, 让路线离水线远一点、走路心/桥心。"""
+    w, h = grid_size
+    img = Image.new("L", (w, h), 0)
+    dr = ImageDraw.Draw(img)
+    for w_seg in osm_water or []:
+        pts = _project_floats(w_seg.get("nodes", []), bbox, grid_size)
+        if len(pts) >= 2:
+            _pil_line(dr, pts, 1, width=2 * radius + 1)
+    px = img.load()
+    return {(x, y) for y in range(h) for x in range(w) if px[x, y] == 1}
+
+
 def find_path_on_grid(grid: Grid, start: Tuple[int, int],
                       end: Tuple[int, int],
-                      road_mask=None) -> List[Tuple[int, int]]:
+                      road_mask=None, water_mask=None) -> List[Tuple[int, int]]:
     """A* 沿可走格从 start 走到 end (含两端)。
     八方向, 斜走不切角 (两边正交格都得是真可走格, 不从楼角斜穿过去);
     代价按进格的 cell 类型 (路 1, 草 4, 树 8, 有路穿过的楼/水 20,
     实心楼/水 500), 启发式是 octile 距离。
     起/终点本身在楼/水里时先吸附到可走格。实在无路时回退成直线,
     保证调用方总有路线。
-    road_mask: _road_proximity_mask() 的返回值 (没有就全按 500 算)。"""
+    road_mask: _road_proximity_mask() 的返回值 (没有就全按 500 算)。
+    water_mask: _water_proximity_mask() 的返回值 (没有就不加贴水代价)。
+    可走格贴水线时 +WATER_EDGE_PENALTY, 路线会离水线远一点、走路心/桥心,
+    不会在视觉上踩进水带里; 桥是唯一过河处时照样过桥, 只是走桥心。"""
     h = len(grid)
     w = len(grid[0]) if h > 0 else 0
     if h == 0 or w == 0:
@@ -543,7 +573,13 @@ def find_path_on_grid(grid: Grid, start: Tuple[int, int],
 
     def _cost(nx: int, ny: int) -> float:
         on_road = road_mask is not None and (nx, ny) in road_mask
-        return _astar_cell_cost(grid[ny][nx], on_road)
+        c = _astar_cell_cost(grid[ny][nx], on_road)
+        # 贴水边加价: 可走格离水线太近时, 渲染的水带会盖到脚下。
+        # 只加在可走格上 (楼/水格本身已是 20/500, 不再叠加)。
+        if (water_mask is not None and (nx, ny) in water_mask
+                and _route_cell_cost(grid[ny][nx]) is not None):
+            c += WATER_EDGE_PENALTY
+        return c
 
     open_heap = [(_heur(sx, sy), 0.0, sx, sy)]
     gscore = {(sx, sy): 0.0}
@@ -610,6 +646,7 @@ def route_along_roads(route_pts_lnglat: List[Tuple[float, float]],
                       grid_size: Tuple[int, int],
                       max_gap_cells: float = 2.0,
                       osm_roads: List[Dict[str, Any]] = None,
+                      osm_water: List[Dict[str, Any]] = None,
                       ) -> List[Dict[str, int]]:
     """路线点 (lng, lat) -> 沿路网寻路 -> grid waypoints。
 
@@ -625,6 +662,7 @@ def route_along_roads(route_pts_lnglat: List[Tuple[float, float]],
     route_pts_lnglat: [(lng, lat), ...] WGS84
     grid: 干净网格 (不带 path overlay, 不然旧路线画出的路会造假路)
     osm_roads: parsed_osm["roads"] (没有就按实心楼/水 500 算)
+    osm_water: parsed_osm["water"] (没有就不加贴水代价)
     返回: [{"x": int, "y": int}, ...] 去重连续点。
     """
     w, h = grid_size
@@ -646,11 +684,13 @@ def route_along_roads(route_pts_lnglat: List[Tuple[float, float]],
 
     # 路网掩码: 有 OSM 路穿过的格子 (门洞、桥才能便宜穿)
     road_mask = _road_proximity_mask(osm_roads, bbox, grid_size) if osm_roads else None
+    # 水线掩码: 离 OSM 水线太近的格子 (贴水边加价, 路线走路心/桥心)
+    water_mask = _water_proximity_mask(osm_water, bbox, grid_size) if osm_water else None
 
     # 3) 逐段 A*, 拼接
     full: List[Tuple[int, int]] = []
     for a, b in zip(anchors, anchors[1:]):
-        seg = find_path_on_grid(grid, a, b, road_mask=road_mask)
+        seg = find_path_on_grid(grid, a, b, road_mask=road_mask, water_mask=water_mask)
         if full and seg and seg[0] == full[-1]:
             seg = seg[1:]
         full.extend(seg)

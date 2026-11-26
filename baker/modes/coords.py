@@ -191,7 +191,8 @@ class CoordsMode(BaseMode):
             if walking_pts:
                 path_waypoints_grid = route_along_roads(
                     walking_pts, grid, bbox, (p.map.width, p.map.height),
-                    osm_roads=parsed_osm.get("roads", []))
+                    osm_roads=parsed_osm.get("roads", []),
+                    osm_water=parsed_osm.get("water", []))
                 print(f"[coords] Path 投影(沿路网寻路): {len(walking_pts)} -> {len(path_waypoints_grid)} grid points")
             else:
                 # 全 driving/transit: 无 street-level path, 用单点 placeholder
