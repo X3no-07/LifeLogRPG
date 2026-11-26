@@ -19,7 +19,7 @@ class MockMode(BaseMode):
         (60, 35), (60, 40), (60, 45), (60, 50),
         (65, 50), (70, 50), (75, 50),
     ]
-    TRANSPORT_BREAKS = {5: "subway", 9: "subway", 13: "walk"}
+    TRANSPORT_BREAKS = {5: "transit", 9: "transit", 13: "walking"}
     DIALOGS = [
         (4.0, "Me", "出门, 天气不错"),
         (12.0, "路人", "早! 赶着去上班呢"),

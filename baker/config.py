@@ -56,4 +56,9 @@ def get_minimax_group(config: Dict[str, Any]) -> str:
 
 
 def get_output_dir(config: Dict[str, Any]) -> Path:
-    return Path(config.get("bake", {}).get("output_dir", str(PROJECT_ROOT / "saved_logs")))
+    out = config.get("bake", {}).get("output_dir", str(PROJECT_ROOT / "saved_logs"))
+    p = Path(out)
+    # config 里写相对路径时, 以项目根目录为准 (不要随启动时的 cwd 跑偏)
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    return p
