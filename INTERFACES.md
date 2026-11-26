@@ -6,32 +6,43 @@
 ## 0. 项目目录结构
 
 ```
-F:\LifeLogRPG_Project\
+LifeLogRPG/
 ├── project.godot                 # Godot 4.7 项目配置
-├── config.json                   # 单一配置中心 (Key + 参数)
+├── config.json                   # 单一配置中心 (Key + 参数, Key 是占位符)
 ├── README.md                     # 用户文档
+├── HANDOFF.md                    # 给美术的交接文档
 ├── INTERFACES.md                 # 本文件 (开发接口契约)
 │
 ├── scenes\
 │   └── main.tscn                 # 主场景 (挂 scripts\main.gd)
 │
-├── scripts\                      # Godot 端 (7 个模块, 每个 < 200 行)
-│   ├── main.gd                   # 主控制器 (~280 行) — 启动 + 主循环
+├── scripts\                      # Godot 端 (12 个模块)
+│   ├── main.gd                   # 主控制器 — 启动 + 主循环
 │   ├── loader.gd                 # JSON 加载 + 强校验 (LogLoader)
 │   ├── world.gd                  # Tilemap + 路径线 (WorldBuilder)
 │   ├── player.gd                 # 角色 sprite 工厂 (Player)
-│   ├── transport.gd             # 换乘动画 (TransportSystem)
+│   ├── transport.gd              # 换乘动画 (TransportSystem)
 │   ├── npc.gd                    # NPC 系统 (NpcSystem)
 │   ├── ui.gd                     # UI 控件 (UISystem)
-│   └── playback.gd               # 播放控制 (PlaybackController)
+│   ├── playback.gd               # 播放控制 (PlaybackController)
+│   ├── audio.gd                  # 音效 (AudioSystem)
+│   ├── weather.gd                # 天气 (WeatherSystem)
+│   ├── avatar_builder.gd         # 捏脸 (AvatarBuilder)
+│   └── loading.gd                # 加载场景
 │
-├── baker\                        # 烘焙脚本 (Python, 8 个模块)
+├── baker\                        # 烘焙脚本 (Python)
 │   ├── __init__.py
-│   ├── cli.py                    # argparse 入口
+│   ├── cli.py                    # argparse 入口 (python -m baker.cli)
 │   ├── config.py                 # config.json 读取
+│   ├── check_api.py              # API 连通性测试 (手动跑)
+│   ├── grid_preview.py           # log → PNG 预览
+│   ├── vlm_qa.py                 # vision 模型自动检查地图
+│   ├── generate_tiles.py         # 生成 8 个地形 tile
+│   ├── generate_interior_icons.py # 生成 13 个室内 icon
 │   ├── clients\                  # 外部 API 客户端
 │   │   ├── amap.py               # 高德 REST (AmapClient)
-│   │   └── llm.py                # MiniMax (LLMClient)
+│   │   ├── llm.py                # MiniMax (LLMClient)
+│   │   └── osm.py                # OSM Overpass (OsmClient + parse_overpass)
 │   ├── modes\                    # 输入模式 (Strategy)
 │   │   ├── base.py               # BaseMode
 │   │   ├── mock.py               # MockMode (无需 Key)
@@ -39,20 +50,19 @@ F:\LifeLogRPG_Project\
 │   │   └── text.py               # TextMode (自然语言, LLM+高德)
 │   ├── core\                     # 核心算法
 │   │   ├── schema.py             # 数据契约 (LogPayload, Waypoint, Dialog)
-│   │   ├── gridifier.py          # 经纬度 -> 网格
+│   │   ├── gridifier.py          # 经纬度 -> 网格 + A* 沿路网寻路
+│   │   ├── gcj02.py              # GCJ-02 ↔ WGS84 互转
+│   │   ├── tiling.py             # 按路径切片 (slice_around_path)
 │   │   └── time_scale.py         # 时间缩放
-│   ├── out\                      # 临时输出 (空)
-│   ├── tests\                    # pytest (TODO)
-│   ├── bake_legacy.py            # 重构前的单文件 (P2 阶段)
-│   ├── test_api.py               # API 连通性测试
-│   └── debug_*.py                # 临时 debug (P2 阶段删)
+│   └── tests\                    # pytest, 278 个测试
 │
 ├── saved_logs\                   # 烘焙输出 (JSON 文件, Godot 读)
 │   └── log_*.json
 │
-├── tools\godot\godot.exe         # Godot 4.7.1 stable (免安装)
 └── exports\                      # 视频导出目标 (P3)
 ```
+
+Godot 引擎二进制不入库 (`tools/godot/` 已 gitignore)，自己装 Godot 4.7.1。
 
 ## 1. Baker CLI 接口
 
@@ -81,7 +91,7 @@ python -m baker.cli [OPTIONS]
 
 ### 1.4 输出位置
 
-`config.json` 里 `bake.output_dir`,默认 `F:\LifeLogRPG_Project\saved_logs\{name}.json`。
+`config.json` 里 `bake.output_dir`，默认 `saved_logs/{name}.json`（相对路径，以项目根目录为准）。
 
 ### 1.5 退出码
 
@@ -104,11 +114,14 @@ python -m baker.cli [OPTIONS]
 
 ```json
 {
-  "meta":       { /* Meta */ },
-  "map":        { /* MapData */ },
-  "path":       [ /* Waypoint, ... */ ],
-  "dialogs":    [ /* Dialog, ... */ ],
-  "characters": [ /* Character, ... */ ]
+  "meta":            { /* Meta */ },
+  "map":             { /* MapData */ },
+  "path":            [ /* Waypoint, ... */ ],
+  "dialogs":         [ /* Dialog, ... */ ],
+  "characters":      [ /* Character, ... */ ],
+  "pois":            [ /* POI, ... */ ],
+  "transit_markers": [ /* TransitMarker, ... */ ],
+  "interiors":       [ /* InteriorSlot, ... */ ]
 }
 ```
 
@@ -131,12 +144,14 @@ python -m baker.cli [OPTIONS]
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
 | `tile_size` | int | ✓ | `16` | 每格像素 |
-| `width` | int | ✓ | `80` | 网格列数 |
-| `height` | int | ✓ | `60` | 网格行数 |
+| `width` | int | ✓ | `160` | 网格列数 |
+| `height` | int | ✓ | `120` | 网格行数 |
 | `grid` | int[][] | ✓ | `[]` | `grid[y][x]`, 类型码见下 |
-| `legend` | dict | × | 默认映射 | `{cell_type: name}` |
+| `building_heights` | int[][] | × | `[]` | 跟 grid 同步, 0=无建筑, N=N 层 (P1.2) |
+| `legend` | dict | × | 默认映射 | `{cell_type: name}` (0-4) |
+| `legend_extended` | dict | × | 默认映射 | `{cell_type: name}` (5-7) |
 
-**Cell 类型码** (P0 阶段):
+**Cell 类型码**:
 
 | 码 | 名称 | 颜色 (GBA 风) |
 |----|------|----------------|
@@ -145,6 +160,9 @@ python -m baker.cli [OPTIONS]
 | 2 | building | `#8c6b4d` |
 | 3 | water | `#3366b3` |
 | 4 | tree | `#1a6626` |
+| 5 | sidewalk | 人行道 |
+| 6 | poi | POI 标记 |
+| 7 | plaza | 广场/铺装 |
 
 ### 2.4 Waypoint
 
@@ -155,6 +173,8 @@ python -m baker.cli [OPTIONS]
 | `t` | float | ✓ | `0.0` | 时刻 (秒), 已缩放 |
 | `label` | string | × | `""` | 地点名 / 路标 |
 | `transport` | enum | ✓ | `"walking"` | `walking` / `driving` / `transit` / `bicycling` |
+
+`transport` 是每个点的，同一条路线里可以换：比如开车到宫门口、进宫改步行（见 §9 的 `split_transport_at_gate`）。Godot 端 `player.gd` 按每个点的 `transport` 切 sprite。
 
 ### 2.5 Dialog
 
@@ -198,8 +218,8 @@ python -m baker.cli [OPTIONS]
 | `minimax.text_model` | `MiniMax-Text-01` |
 | `minimax.vision_model` | `abab6.5s-chat` |
 | `bake.tile_size_px` | `16` |
-| `bake.viewport_grid_w` | `80` |
-| `bake.viewport_grid_h` | `60` |
+| `bake.viewport_grid_w` | `160` |
+| `bake.viewport_grid_h` | `120` |
 | `bake.default_city` | `"北京"` |
 | `playback.default_speed` | `1.0` |
 | `playback.min_speed` | `0.25` |
@@ -316,14 +336,17 @@ baker/cli.py
   ├── baker/config.py
   ├── baker/core/time_scale.py
   │     └── baker/core/schema.py
+  ├── baker/core/gcj02.py            # GCJ-02 ↔ WGS84 (text/coords 模式都用)
+  ├── baker/core/tiling.py           # slice_around_path
   ├── baker/modes/
   │     ├── base.py ──── core/schema.py
   │     ├── mock.py
-  │     ├── coords.py ── core/gridifier.py
-  │     └── text.py ──── clients/{amap,llm}.py + core/{gridifier,time_scale,schema}.py
+  │     ├── coords.py ── core/{gridifier,gcj02,tiling}.py + clients/osm.py
+  │     └── text.py ──── clients/{amap,llm,osm}.py + core/{gridifier,gcj02,tiling,time_scale,schema}.py
   └── baker/clients/
         ├── amap.py
-        └── llm.py
+        ├── llm.py
+        └── osm.py
 ```
 
 ```
@@ -346,10 +369,8 @@ Godot main.tscn
 
 ### 6.1 烘焙新日志
 
-```powershell
-cd F:\LifeLogRPG_Project
-$env:PYTHONIOENCODING = "utf-8"
-chcp 65001 | Out-Null
+```bash
+cd <项目根目录>
 
 # Mock 模式 (无需 Key)
 python -m baker.cli --mock --name log_001
@@ -357,27 +378,29 @@ python -m baker.cli --mock --name log_001
 # 坐标模式
 python -m baker.cli --coords "116.40,39.90;116.41,39.91" --name log_002
 
-# 文本模式 (需要 config.json 里有 amap + minimax key)
+# 文本模式 (需要 config.local.json 里有 amap + minimax key)
 python -m baker.cli --text "今天从西单走到灵境胡同, 然后坐地铁去西二旗" --name log_003 --target-duration 30
 ```
 
 ### 6.2 启动 Godot
 
-```powershell
-# 默认 log (config 里 DEFAULT_LOG_PATH)
-& "F:\LifeLogRPG_Project\tools\godot\godot.exe" --path "F:\LifeLogRPG_Project"
+Godot 4.7.1 自己装，引擎二进制不入库。
+
+```bash
+# 默认 log (main.gd 里 DEFAULT_LOG_PATH)
+godot --path .
 
 # 指定 log
-& "F:\LifeLogRPG_Project\tools\godot\godot.exe" --path "F:\LifeLogRPG_Project" --log=res://saved_logs/log_demo.json
+godot --path . --log=res://saved_logs/log_demo.json
 
 # Headless 验证 (无窗口)
-& "F:\LifeLogRPG_Project\tools\godot\godot.exe" --headless --quit-after 60 --path "F:\LifeLogRPG_Project" --log=res://saved_logs/log_demo.json
+godot --headless --quit-after 60 --path . --log=res://saved_logs/log_demo.json
 ```
 
 ### 6.3 API 连通性测试
 
-```powershell
-python F:\LifeLogRPG_Project\baker\test_api.py
+```bash
+python baker/check_api.py
 ```
 
 ## 7. 维护规范 (新增功能时)
@@ -402,16 +425,58 @@ python F:\LifeLogRPG_Project\baker\test_api.py
    - `baker/tests/test_xxx.py`, pytest 风格
    - 跑 `python -m pytest baker/tests/`
 
-5. **P2 清理任务**:
-   - 删 `baker/bake_legacy.py`
-   - 删 `baker/debug_amap.py` + `baker/debug_llm.py`
-   - 移到 `baker/tests/` 改成正式测试
+5. **P2 清理任务** (已做完):
+   - `baker/bake_legacy.py` 已删
+   - `baker/debug_amap.py` + `baker/debug_llm.py` 已删
+   - `baker/debug_real_*.py` + `baker/debug_way_project.py` + `baker/verify_final.py` 已删 (2026-11-26 清理, 功能被 pytest + check_api 覆盖)
 
 ## 8. 已知非核心问题 (P2 阶段处理)
 
 - `config.json` 字段无 JSON Schema 校验 (Pydantic 风格)
-- `loader.gd` 用宽松 `.get(key, default)`, schema 校验只 warn 不阻断
-- baker 无 pytest,Godot 端无 GUT (Godot Unit Test)
+- `loader.gd` 用宽松 `.get(key, default)`, schema 校验只 warn 不阻断; 宽/高缺失时 fallback 还是旧的 80×60 (baker 永远写 160×120, 平时碰不到)
+- Godot 端无 GUT (Godot Unit Test)
 - 视频导出模块未实现 (P3)
 - Skeleton2D 真 2D 木偶未实现 (P2.3 捏脸)
 - 8-Bit BGM / 天气粒子未实现 (P2.3)
+
+## 9. 路线与坐标 (2026-11-26 烘焙改进)
+
+### 9.1 坐标口径
+
+- 高德给的是 GCJ-02，OSM 是 WGS84，两边差几百米，不能混着用。
+- `baker/core/gcj02.py`：`gcj02_to_wgs84` / `wgs84_to_gcj02` / `gcj02_to_wgs84_points`（标准 eviltransform，纯标准库，往返误差约 1.6e-09°）。
+- text/coords 模式：高德的点（geocode、路径）先转 WGS84 再切片/投影；问高德要周边 POI 时，切片中心再转回 GCJ-02。OSM 原生的 interiors 不转。
+- 天安门一带 GCJ→WGS84 的偏移约 555 米，不转的话路线和路网会对不上。
+
+### 9.2 网格
+
+- 默认 160×120（`config.json` 的 `bake.viewport_grid_w/h`，`baker/core/schema.py` 的 MapData 默认值）。一格多大看切片（自适应切片，半径 800 米、总长约 1.5 公里封顶）；160×120 的格子是竖长方形，320×240 预览版才是一格约 7 米的正方形。
+- 楼栅格化用 PIL 多边形填充（`osm_to_grid`），不是逐点 point-in-polygon：320×240 下旧办法要 1 小时，现在不到 1 秒。
+- 画的顺序：底（有 ground 数据时默认铺装、否则草地）→ 地面类型 → 绿地 → 水（闭合填面、开放画线宽 2，不再把整条河填成湖）→ 路（画在水上，过河是桥）→ 楼（楼后画，路不再切楼）。
+- `building:part` 也算楼（故宫那种大殿碎片），不然大殿会缺块。
+
+### 9.3 路线：A\* 沿路网走
+
+- `baker/core/gridifier.py` 的 `route_along_roads`：锚点先 BFS 吸附到最近的可走格（不限半径），再一段一段 A\* 沿路连起来，最后加密。
+- A\* 代价：路/广场/人行道 1，草地 4，树 8；楼/水原则上不走，但有 OSM 路穿过的格（门洞、桥）代价 20，实心楼/水面代价 500（只有实在没路才穿、且走最窄处）。对角线不切楼角。
+- 门洞/桥处短暂穿墙的格子由 `carve_route_passages` 刻成路（`apply_path_overlay` 再叠上去）。
+- 水边加价：`find_path_on_grid` 的 `water_mask`（`_water_proximity_mask`，水线周围 2 格）让贴水线的可走格 +2.0，路线会走路心/桥心、不贴着水线走。桥本身过河没办法，只能走桥心。
+- `densify_and_snap_route` 是老办法（加密 + 局部吸附），没 OSM 数据时 fallback 用它。
+
+### 9.4 主轴吸附 spine_x（库函数，烘焙模式还没接）
+
+- `route_along_roads(..., spine_x=...)`：锚点先横向收到主轴 x（纬度不动），再 BFS 吸附到主轴路上的可走格。主轴位置由调用方从 OSM 数据算（比如午门建筑中心 x），不是写死坐标。
+- 用途：老日志的锚点本身偏离主轴（比如天安门那条偏东 30 多格），只靠 BFS 会吸到边路；传了 spine_x 路线就沿主轴走。
+- 注意：text/coords 烘焙模式现在还没传 spine_x（见 9.6），故宫那条路线是预览重建脚本调的。
+
+### 9.5 城门分段交通工具 split_transport_at_gate（库函数，烘焙模式还没接）
+
+- `split_transport_at_gate(waypoints, gate_nodes_lnglat, bbox, grid_size, outside="driving", inside="walking")`：城门建筑（OSM 节点）投到网格取包围盒，路线第一次进入包围盒的那一点起步行，之前开车。分段点按 OSM 算，不写死坐标/点号；路线没进包围盒时全段 outside。
+- 道理：开车只能到宫门口，进宫城只能步行。
+- 注意：text/coords 烘焙模式现在还没调它（见 9.6），故宫那条路线是预览重建脚本调的。
+
+### 9.6 接线状态（实话）
+
+- 烘焙模式（text/coords）已经接了：160×120、GCJ-02 互转、A\* 沿路网、贴水边加价、门洞刻通道。
+- 还没接进烘焙模式：`spine_x`、`split_transport_at_gate`。它俩在 `gridifier.py` 里是现成的库函数、有测试，但 text.py/coords.py 没调。想让新烘焙的日志也自动走主轴、进宫自动换步行，得改 text.py/coords.py 接上（这是 baker 逻辑改动，不在这次文档整理里）。
+- 预览重建脚本（不在这个仓库，在 `~/workspace/map-preview-firered/`）调了它俩，所以试玩页的故宫路线是沿主轴、进宫步行的。

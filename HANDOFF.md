@@ -10,7 +10,7 @@
 
 - 用户输入一段中文生活日志(比如"从西单走到灵境胡同逛逛,然后坐地铁去西二旗")
 - 系统调 LLM 提取地点 → 高德 API 拿真实坐标 + 路径 → OSM 拿真实街网/建筑
-- 烘焙成 JSON(80x60 网格地图 + 角色路径 + 室内 slot)
+- 烘焙成 JSON(160x120 网格地图 + 角色路径 + 室内 slot)
 - Godot 4.7.1 加载,角色在 GBA 风格地图上沿街走,2x 缩放,1280x720 窗口
 - 30s 一段,像宝可梦那种 top-down RPG 风格
 
@@ -46,7 +46,8 @@
 | **P1.4 VLM QA** | ✅ | vision model 自动检查地图合理性 + 打分 |
 | **P2.1 Transport** | ✅ | 4 换乘 sprite (walk/drive/transit/bike) + fade 动画 |
 | **P2.2 NPC** | ✅ | speaker → 像素方块 + 名字 tag |
-| **P2.3 Additions** | ✅ | 156→221 测试, LoadingScene, AudioSystem, WeatherSystem, AvatarBuilder |
+| **P2.3 Additions** | ✅ | 278 测试, LoadingScene, AudioSystem, WeatherSystem, AvatarBuilder |
+| **2026-11-26 烘焙改进** | ✅ | 网格 160×120 + GCJ-02 对齐 + A* 沿路网寻路 + spine_x 主轴吸附 + 城门分段交通工具 + 水边加价 |
 | **P3 视频导出** | 📋 | FFmpeg 录屏 + 30s 输出 + 加密 .dat |
 
 **没做(将来):**
@@ -272,11 +273,10 @@ if moving and facing == "down":
 
 ## 8. 验证方法
 
-美术资产到位后,在 Godot 里跑:
+美术资产到位后,在 Godot 里跑 (Godot 4.7.1 自己装,引擎二进制不入库):
 
-```powershell
-$env:LIFELOG_JSON = "res://saved_logs/log_p13.json"
-.\tools\godot\godot.exe --path .
+```bash
+LIFELOG_JSON="res://saved_logs/log_p13.json" godot --path .
 ```
 
 应该看到:
@@ -315,7 +315,7 @@ python baker/grid_preview.py --log saved_logs/log_p13.json --out exports/check.p
 
 ## 10. 联系方式 (项目位置)
 
-- **项目根目录:** `F:\LifeLogRPG_Project\`
+- **项目根目录:** 本仓库根目录 (PC 上一般是 `F:\LifeLogRPG_Project\`)
 - **关键文件:**
   - `baker/` Python 烘焙脚本
   - `scripts/` Godot GDScript
