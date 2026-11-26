@@ -17,6 +17,7 @@ from baker.core.gridifier import (
     osm_to_grid, densify_and_snap_route,
     _route_cell_cost, snap_to_passable, find_path_on_grid,
     route_along_roads, apply_path_overlay, split_transport_at_gate,
+    smooth_path_on_grid, _segment_crosses_blocked,
     CELL_GRASS, CELL_ROAD, CELL_BUILDING, CELL_WATER, CELL_TREE,
     CELL_SIDEWALK, CELL_PLAZA,
 )
@@ -514,3 +515,144 @@ class TestSplitTransportAtGate:
         wps = [{"x": 10, "y": 18}, {"x": 10, "y": 2}]
         out = split_transport_at_gate(wps, [], bbox, (20, 20))
         assert [p["transport"] for p in out] == ["driving", "driving"]
+
+
+class TestSmoothPathOnGrid:
+    """smooth_path_on_grid: 贪心视线法平滑逐格路径 (Bug 1)
+
+    道理: A* 出来的是逐格点列 (点距 1-2 格 = 楼梯/锯齿), 视线法从
+    一点往前看、能直线通到的最远点就直连; 直线段穿楼/水就保留拐点。
+    """
+
+    def _staircase(self, n=10):
+        # 斜向楼梯: (0,0),(1,1),(2,2),... 全是斜步, 平滑后应只剩两端
+        return [{"x": i, "y": i} for i in range(n)]
+
+    def test_diagonal_staircase_collapses_to_endpoints(self):
+        g = _grid("rrrrrrrrrr",
+                  "rrrrrrrrrr",
+                  "rrrrrrrrrr",
+                  "rrrrrrrrrr",
+                  "rrrrrrrrrr",
+                  "rrrrrrrrrr",
+                  "rrrrrrrrrr",
+                  "rrrrrrrrrr",
+                  "rrrrrrrrrr",
+                  "rrrrrrrrrr")
+        out = smooth_path_on_grid(self._staircase(10), g)
+        assert out == [{"x": 0, "y": 0}, {"x": 9, "y": 9}]
+
+    def test_zigzag_on_open_ground_collapses(self):
+        # 横平竖直锯齿: (0,0),(1,0),(1,1),(2,1),(2,2)... 全是 1 格步
+        wps = []
+        for i in range(6):
+            wps.append({"x": i, "y": i})
+            wps.append({"x": i + 1, "y": i})
+        wps = [wps[0]] + [p for p in wps[1:] if p != wps[0]]
+        g = _grid(*["r" * 12 for _ in range(12)])
+        out = smooth_path_on_grid(wps, g)
+        assert out[0] == {"x": 0, "y": 0}
+        assert out[-1] == wps[-1]
+        assert len(out) <= 3  # 空地上直线可达, 最多剩一两个中间点
+
+    def test_building_keeps_the_corner(self):
+        # 楼墙横在中间, 只有 x=5 处留一个路口, 路线绕墙角走: 直线横切
+        # 会穿楼, 拐点必须保留
+        g = _grid("rrrrrrrrrr",
+                  "rrrrrrrrrr",
+                  "BBBBBrBBBB",
+                  "rrrrrrrrrr",
+                  "rrrrrrrrrr")
+        # 绕路点列: 沿顶路向东, 在缺口 x=5 处南下, 再沿底路向东
+        wps = [{"x": x, "y": 0} for x in range(6)]
+        wps += [{"x": 5, "y": 1}, {"x": 5, "y": 2}, {"x": 5, "y": 3}]
+        wps += [{"x": x, "y": 4} for x in range(6, 10)]
+        out = smooth_path_on_grid(wps, g)
+        assert out[0] == {"x": 0, "y": 0} and out[-1] == {"x": 9, "y": 4}
+        # 每段直线都不穿楼 (用同一条校验函数复核)
+        for a, b in zip(out, out[1:]):
+            assert not _segment_crosses_blocked(g, a["x"], a["y"], b["x"], b["y"])
+        # 拐点留下来了: 必须经过缺口列 x=5 附近, 不能直接从 (0,0) 连到 (9,4)
+        assert len(out) > 2
+        assert any(p["x"] == 5 for p in out)
+
+    def test_water_keeps_the_corner(self):
+        # 河横贯, 只有 x=2 处一座桥: 直线横切会穿水, 拐点必须保留
+        g = _grid("rrrrrrrrrr",
+                  "wwwwrwwwww",
+                  "rrrrrrrrrr")
+        wps = [{"x": x, "y": 0} for x in range(5)]
+        wps += [{"x": 4, "y": 1}, {"x": 4, "y": 2}]
+        wps += [{"x": x, "y": 2} for x in range(5, 10)]
+        out = smooth_path_on_grid(wps, g)
+        assert out[0] == {"x": 0, "y": 0} and out[-1] == {"x": 9, "y": 2}
+        for a, b in zip(out, out[1:]):
+            assert not _segment_crosses_blocked(g, a["x"], a["y"], b["x"], b["y"])
+        assert len(out) > 2
+        assert any(p["x"] == 4 for p in out)  # 必须经过桥
+
+    def test_subset_endpoints_and_short(self):
+        g = _grid("rrr", "rrr", "rrr")
+        wps = [{"x": 0, "y": 0}, {"x": 1, "y": 1}, {"x": 2, "y": 2}]
+        out = smooth_path_on_grid(wps, g)
+        assert out[0] in wps and out[-1] in wps
+        assert all(p in wps for p in out)
+        assert smooth_path_on_grid([], g) == []
+        assert smooth_path_on_grid([{"x": 1, "y": 1}], g) == [{"x": 1, "y": 1}]
+        two = [{"x": 0, "y": 0}, {"x": 2, "y": 2}]
+        assert smooth_path_on_grid(two, g) == two
+
+    def test_no_corner_cut(self):
+        # 两栋楼斜对角相邻: 直线从楼角斜切过去要被挡住, 拐点保留
+        g = _grid("rrB.",
+                  "rBB.",
+                  "rrrr")
+        # 直线 (1,0)->(2,2) 会从 (2,1)/(1,1) 的楼角切过
+        assert _segment_crosses_blocked(g, 1, 0, 2, 2)
+        wps = [{"x": 1, "y": 0}, {"x": 1, "y": 1}, {"x": 1, "y": 2}, {"x": 2, "y": 2}]
+        out = smooth_path_on_grid(wps, g)
+        assert out[0] == {"x": 1, "y": 0} and out[-1] == {"x": 2, "y": 2}
+        for a, b in zip(out, out[1:]):
+            assert not _segment_crosses_blocked(g, a["x"], a["y"], b["x"], b["y"])
+
+    def test_smooths_real_astar_output(self):
+        # 端到端: A* 在 L 形路网上的逐格输出, 平滑后点变少、每段变长、
+        # 全程不穿楼/水
+        g = _grid("..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "rrrrrrrrrrrrrrrrrrrr",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........",
+                  "..........r.........")
+        raw = find_path_on_grid(g, (0, 10), (10, 0))
+        assert len(raw) == 20  # 逐格 A* 本来就很碎 (L 形: 横 11 格 + 竖 10 格 - 拐角重复 1)
+        wps = [{"x": x, "y": y} for x, y in raw]
+        out = smooth_path_on_grid(wps, g)
+        assert out[0] == {"x": 0, "y": 10} and out[-1] == {"x": 10, "y": 0}
+        assert len(out) < len(wps)
+        # L 形的拐角 (10,10) 不能被抄近道切掉: 每段中点离 L 形路不超过 3 格
+        import math as _math
+        for a, b in zip(out, out[1:]):
+            assert not _segment_crosses_blocked(g, a["x"], a["y"], b["x"], b["y"])
+            assert g[b["y"]][b["x"]] != CELL_BUILDING
+            assert g[b["y"]][b["x"]] != CELL_WATER
+            mx, my = (a["x"] + b["x"]) / 2, (a["y"] + b["y"]) / 2
+            # 到 L 形路的距离 = 到横腿 (y=10, x 0..10) 与竖腿 (x=10, y 0..10) 的最小值
+            d_h = min(_math.hypot(mx - x, my - 10) for x in range(11))
+            d_v = min(_math.hypot(mx - 10, my - y) for y in range(11))
+            d_to_L = min(d_h, d_v)
+            assert d_to_L <= 3.5, (a, b, d_to_L)

@@ -725,6 +725,94 @@ def route_along_roads(route_pts_lnglat: List[Tuple[float, float]],
     return ded
 
 
+def _near_path_mask(pts, w: int, h: int, radius: float) -> set:
+    """原路径附近 radius 格内的格子集合 (走廊)。
+    平滑的直线段只能在走廊里走, 不能抄近道横切街区、拐大弯离路太远。
+    欧氏半径, 一次算好, 每次视线检查只查集合成员。"""
+    near = set()
+    r = int(radius) + 1
+    r2 = radius * radius
+    for (x, y) in pts:
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if dx * dx + dy * dy <= r2:
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < w and 0 <= ny < h:
+                        near.add((nx, ny))
+    return near
+
+
+def _segment_crosses_blocked(grid: Grid, x0: int, y0: int, x1: int, y1: int,
+                             blocked=(CELL_BUILDING, CELL_WATER),
+                             near_mask=None) -> bool:
+    """直线段 (x0,y0)->(x1,y1) 是否穿过楼/水格、或跑出原路径的走廊。
+    采样 Bresenham 整数格; 起终点本身豁免 (它们是原路径上的点, 门洞那格
+    本来就是楼格, 不能因此判整段不可走); 斜向步进时两边正交邻格也查,
+    不从楼角/水角斜切过去 (跟 find_path_on_grid 的不切角规则一致)。
+    near_mask: _near_path_mask() 的返回值 (没有就不限制偏离)。"""
+    cells = _straight_line_cells(x0, y0, x1, y1)
+    h = len(grid)
+    w = len(grid[0]) if h > 0 else 0
+    for (x, y) in cells[1:-1]:
+        if 0 <= x < w and 0 <= y < h and grid[y][x] in blocked:
+            return True
+        if near_mask is not None and (x, y) not in near_mask:
+            return True
+    for (x, y), (nx, ny) in zip(cells, cells[1:]):
+        dx, dy = nx - x, ny - y
+        if dx and dy:
+            for ox, oy in ((nx, y), (x, ny)):
+                if 0 <= ox < w and 0 <= oy < h and grid[oy][ox] in blocked:
+                    return True
+    return False
+
+
+def smooth_path_on_grid(waypoints: List[Dict[str, int]], grid: Grid,
+                        blocked=(CELL_BUILDING, CELL_WATER),
+                        max_deviation: float = 3.0,
+                        ) -> List[Dict[str, int]]:
+    """贪心视线法平滑逐格路径 (Bug 1: 路线楼梯状)。
+
+    A* 出来的是逐格点列 (点距 1-2 格, 斜走 + 横平竖直交替 = 楼梯/
+    锯齿), 试玩里红线和人物跟着楼梯走。从一点往前看, 能直线通到的
+    最远点就直连, 跳过中间不必要的拐点。直线段要同时过两关才直连:
+    1) 不穿楼/水 (穿了就保留拐点, 绝不把路修进楼里/水里);
+    2) 不跑出原路径 max_deviation 格的走廊 (不抄近道横切街区、拐
+       大弯离路太远, 平滑完还是顺着原来的路走)。
+
+    waypoints: [{"x": int, "y": int}, ...]
+        (route_along_roads / densify_and_snap_route 的输出格式)
+    grid: 干净网格 (osm_to_grid 的输出, 不带 path overlay; 没 OSM 时
+        用 build_grid_from_waypoints 的输出也行)
+    blocked: 视线不可穿的 cell (默认楼/水; 草/树/路/广场都能穿,
+        只是拐个弯抄近道, 不会进楼进水)
+    max_deviation: 直线段离原路径最远几格 (默认 3 格, 160x120 图上
+        约 20 米, 够抹掉楼梯锯齿, 又不会拐大弯)
+    返回: 原列表的子集 (同一批 dict, 首尾必留), 点变少、每段变长、
+        顺着路的方向走。点数 <3 时原样返回。
+    """
+    if len(waypoints) < 3:
+        return list(waypoints)
+    pts = [(p["x"], p["y"]) for p in waypoints]
+    n = len(pts)
+    h = len(grid)
+    w = len(grid[0]) if h > 0 else 0
+    near_mask = _near_path_mask(pts, w, h, max_deviation) if h > 0 and w > 0 else None
+    keep = [0]
+    anchor = 0
+    while anchor < n - 1:
+        far = anchor + 1
+        for j in range(anchor + 2, n):
+            if _segment_crosses_blocked(grid, pts[anchor][0], pts[anchor][1],
+                                        pts[j][0], pts[j][1], blocked,
+                                        near_mask=near_mask):
+                break
+            far = j
+        keep.append(far)
+        anchor = far
+    return [waypoints[i] for i in keep]
+
+
 def split_transport_at_gate(waypoints: List[Dict[str, int]],
                             gate_nodes_lnglat: List[Tuple[float, float]],
                             bbox: Tuple[float, float, float, float],

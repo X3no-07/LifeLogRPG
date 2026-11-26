@@ -19,6 +19,7 @@ from ..core.gridifier import (
     polyline_to_points, build_grid_from_waypoints,
     approx_distance_km, osm_to_grid, densify_and_snap_route,
     route_along_roads, apply_path_overlay, carve_route_passages,
+    smooth_path_on_grid,
 )
 from ..core.gcj02 import gcj02_to_wgs84, wgs84_to_gcj02, gcj02_to_wgs84_points
 from ..core.tiling import slice_around_path, lnglat_to_grid_cell
@@ -288,6 +289,11 @@ class TextMode(BaseMode):
                 path_source, grid, bbox, (p.map.width, p.map.height),
                 osm_roads=parsed_osm.get("roads", []),
                 osm_water=parsed_osm.get("water", []))
+            # Bug 1: A* 出来的是逐格点列 (点距 1-2 格 = 楼梯/锯齿), 视线法
+            # 平滑后再刻通道/叠路, 直线段穿楼/水时保留拐点、不进楼不进水。
+            n_raw = len(path_waypoints_grid)
+            path_waypoints_grid = smooth_path_on_grid(path_waypoints_grid, grid)
+            print(f"[text] Path 平滑(视线法): {n_raw} -> {len(path_waypoints_grid)} 点")
             # 门洞/桥处短暂穿墙的格子刻成路 (真实走道, 只是被楼盖住了)
             n_carved = carve_route_passages(grid, path_waypoints_grid, building_heights)
             if n_carved:
@@ -337,6 +343,10 @@ class TextMode(BaseMode):
                 path_source, [], bbox, (p.map.width, p.map.height))
             print(f"[text] Path 投影(贴路): {len(path_source)} -> {len(path_waypoints_grid)} grid points")
             p.map.grid = build_grid_from_waypoints(path_waypoints_grid, p.map.width, p.map.height)
+            # Bug 1: 同 OSM 分支, 逐格点列视线法平滑 (穿楼/水保留拐点)
+            n_raw = len(path_waypoints_grid)
+            path_waypoints_grid = smooth_path_on_grid(path_waypoints_grid, p.map.grid)
+            print(f"[text] Path 平滑(视线法): {n_raw} -> {len(path_waypoints_grid)} 点")
 
         # 8) 组装 waypoint + meta
         # path 只含步行/骑行点, 总时长 = walking 段时长。
@@ -346,12 +356,17 @@ class TextMode(BaseMode):
         walking_total = sum(d for d, m in zip(seg_durations, seg_modes) if m in ("walking", "bicycling"))
         transit_total = sum(d for d, m in zip(seg_durations, seg_modes) if m in ("transit", "driving"))
 
-        # walking 段: waypoint 沿 path, time = ratio * walking_total
+        # walking 段: waypoint 沿 path, time 按累计路程分 (匀速走)。
+        # 平滑后每段长度不一, 再按点序号分 t 会忽快忽慢, 所以改按路程分。
         # 注意: walking_pts 包含 pure walking + transit 的 walking sub-segments
         # 它们在视觉上都是在街道上走, 所以都标 walking
         n = len(path_waypoints_grid)
+        cum_dist = [0.0]
+        for a, b in zip(path_waypoints_grid, path_waypoints_grid[1:]):
+            cum_dist.append(cum_dist[-1] + ((b["x"] - a["x"]) ** 2 + (b["y"] - a["y"]) ** 2) ** 0.5)
+        total_dist = cum_dist[-1] if cum_dist[-1] > 0 else 1.0
         for i, wp in enumerate(path_waypoints_grid):
-            ratio = i / max(n - 1, 1)
+            ratio = cum_dist[i] / total_dist
             t = ratio * walking_total
             # label 仍按 segment 分, 但 transport 统一 walking
             meta_idx = min(int(ratio * len(waypoint_metas)), len(waypoint_metas) - 1)
