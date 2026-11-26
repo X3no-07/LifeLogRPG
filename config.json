@@ -23,7 +23,7 @@
     "api_key_filled": false,
     "_fill_in": "把真实 key 填到 config.local.json 的 minimax.api_key 字段",
     "base_url": "https://api.minimaxi.com/v1",
-    "text_model": "MiniMax-Text-01",
+    "text_model": "MiniMax-M3.1-Flash",
     "vision_model": "abab6.5s-chat",
     "timeout_sec": 30,
     "_vision_model_note": "MiniMax 文档说视觉模型是 MiniMax-VL-01, 但实际不存在。abab6.5s-chat 是唯一实测可用的 vision 模型。来源: agent memory 2026-07-19"

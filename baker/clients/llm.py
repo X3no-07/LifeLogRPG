@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 class LLMClient:
     def __init__(self, api_key: str, group_id: str = "",
                  base_url: str = "https://api.minimaxi.com/v1",
-                 model: str = "MiniMax-Text-01",
+                 model: str = "MiniMax-M3.1-Flash",
                  timeout: int = 30, verbose: bool = False):
         self.api_key = api_key
         self.group_id = group_id
@@ -66,6 +66,12 @@ class LLMClient:
             data = r.json()
             if "choices" in data and data["choices"]:
                 return data["choices"][0]["message"]["content"]
+            # 无 choices: 把服务端的错误原因打出来 (模型下架 2069 / 余额不足 1008 等),
+            # 否则上层只看到 None, 查不出原因
+            base = data.get("base_resp", {}) if isinstance(data, dict) else {}
+            if base.get("status_code"):
+                print(f"[llm] API 错误: {base.get('status_code')} {base.get('status_msg', '')} (model={self.model})",
+                      file=sys.stderr)
         except Exception as e:
             self._log(f"chat error: {e}")
         return None

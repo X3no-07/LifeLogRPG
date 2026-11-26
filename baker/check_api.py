@@ -83,7 +83,7 @@ def test_amap_route(api_key: str, base_url: str = "https://restapi.amap.com/v3")
 
 
 def test_minimax(api_key: str, group_id: str, base_url: str = "https://api.minimaxi.com/v1",
-                 model: str = "MiniMax-Text-01") -> bool:
+                 model: str = "MiniMax-M3.1-Flash") -> bool:
     """测试 MiniMax 文本生成 API"""
     import requests
     print(f"\n[3] MiniMax 文本 API (model={model})")
@@ -126,7 +126,7 @@ def main():
     mm_key = config.get("minimax", {}).get("api_key", "")
     mm_group = config.get("minimax", {}).get("group_id", "")
     mm_base = config.get("minimax", {}).get("base_url", "https://api.minimaxi.com/v1")
-    mm_model = config.get("minimax", {}).get("text_model", "MiniMax-Text-01")
+    mm_model = config.get("minimax", {}).get("text_model", "MiniMax-M3.1-Flash")
 
     print("=" * 60)
     print("Life Log RPG - API 连通性测试")

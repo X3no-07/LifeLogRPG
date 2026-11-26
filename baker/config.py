@@ -32,7 +32,7 @@ def _default_config() -> Dict[str, Any]:
         "amap": {"api_key": "", "base_url": "https://restapi.amap.com/v3", "timeout_sec": 10},
         "minimax": {
             "api_key": "", "group_id": "", "base_url": "https://api.minimaxi.com/v1",
-            "text_model": "MiniMax-Text-01", "vision_model": "abab6.5s-chat", "timeout_sec": 30,
+            "text_model": "MiniMax-M3.1-Flash", "vision_model": "abab6.5s-chat", "timeout_sec": 30,
         },
         "bake": {
             "output_dir": str(PROJECT_ROOT / "saved_logs"),

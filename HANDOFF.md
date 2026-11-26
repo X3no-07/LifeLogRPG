@@ -21,7 +21,7 @@
 ## 2. 技术栈
 
 - **baker** (Python 3.14): 烘焙脚本,把日志 → JSON
-  - LLM: MiniMax (`MiniMax-Text-01` 文本 / `abab6.5s-chat` vision)
+  - LLM: MiniMax (`MiniMax-M3.1-Flash` 文本 / `abab6.5s-chat` vision)
   - POI: 高德地图 Web API
   - 地图: OpenStreetMap Overpass API
 - **Godot 4.7.1** + GDScript: 运行时,加载 JSON 渲染场景

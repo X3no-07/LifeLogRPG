@@ -61,7 +61,7 @@ class TextMode(BaseMode):
             api_key=self.config.get("minimax", {}).get("api_key", ""),
             group_id=self.config.get("minimax", {}).get("group_id", ""),
             base_url=self.config.get("minimax", {}).get("base_url", "https://api.minimaxi.com/v1"),
-            model=self.config.get("minimax", {}).get("text_model", "MiniMax-Text-01"),
+            model=self.config.get("minimax", {}).get("text_model", "MiniMax-M3.1-Flash"),
         )
         self.amap = AmapClient(
             api_key=self.config.get("amap", {}).get("api_key", ""),

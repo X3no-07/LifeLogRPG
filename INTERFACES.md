@@ -215,7 +215,7 @@ python -m baker.cli [OPTIONS]
 | `amap.api_key` | `""` |
 | `amap.base_url` | `https://restapi.amap.com/v3` |
 | `minimax.base_url` | `https://api.minimaxi.com/v1` |
-| `minimax.text_model` | `MiniMax-Text-01` |
+| `minimax.text_model` | `MiniMax-M3.1-Flash` |
 | `minimax.vision_model` | `abab6.5s-chat` |
 | `bake.tile_size_px` | `16` |
 | `bake.viewport_grid_w` | `160` |
