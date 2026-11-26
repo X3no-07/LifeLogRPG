@@ -266,6 +266,27 @@ class TestRouteAlongRoads:
         # (lng=1/3, lat=2/3) -> fx=1.0, fy=1.0, 正好 (1,1)
         assert route_along_roads([(1.0 / 3, 2.0 / 3)], g, bbox, (3, 3)) == [{"x": 1, "y": 1}]
 
+    def test_spine_x_pulls_displaced_anchors_to_axis(self):
+        # 两条平行南北路: 主轴 x=10, 偏东的边路 x=16。锚点落在边路
+        # 上 (老日志切片错位), 不传 spine 时路线就沿边路走; 传了
+        # spine_x=10 后锚点横向收到主轴, 路线沿主轴走。
+        rows = []
+        for _y in range(20):
+            row = list("." * 20)
+            row[10] = "r"
+            row[16] = "r"
+            rows.append("".join(row))
+        g = _grid(*rows)
+        bbox = (0.0, 0.0, 1.0, 1.0)
+        # 锚点 (lng, lat): x=16 列, y=18 (南) 与 y=2 (北)
+        pts = [(0.80, 0.10), (0.80, 0.90)]
+        plain = route_along_roads(pts, g, bbox, (20, 20))
+        assert plain and all(p["x"] == 16 for p in plain), plain
+        spined = route_along_roads(pts, g, bbox, (20, 20), spine_x=10)
+        assert spined and all(p["x"] == 10 for p in spined), spined
+        assert spined[0] == {"x": 10, "y": 18}
+        assert spined[-1] == {"x": 10, "y": 2}
+
     def test_buildings_never_on_route(self):
         # 楼群挡路: 锚点连线横穿楼群, 寻路必须绕开
         g = _grid("rrrrrrrrrrrr",

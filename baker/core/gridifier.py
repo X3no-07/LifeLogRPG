@@ -647,6 +647,7 @@ def route_along_roads(route_pts_lnglat: List[Tuple[float, float]],
                       max_gap_cells: float = 2.0,
                       osm_roads: List[Dict[str, Any]] = None,
                       osm_water: List[Dict[str, Any]] = None,
+                      spine_x: float = None,
                       ) -> List[Dict[str, int]]:
     """路线点 (lng, lat) -> 沿路网寻路 -> grid waypoints。
 
@@ -663,12 +664,22 @@ def route_along_roads(route_pts_lnglat: List[Tuple[float, float]],
     grid: 干净网格 (不带 path overlay, 不然旧路线画出的路会造假路)
     osm_roads: parsed_osm["roads"] (没有就按实心楼/水 500 算)
     osm_water: parsed_osm["water"] (没有就不加贴水代价)
+    spine_x: 主轴线格子 x (可选)。日志锚点本身偏离主轴时 (比如老
+        烘焙切片错位, 天安门锚点落在中轴线以东 30 多格), 只靠 BFS
+        吸附会吸到旁边的小路, 路线就偏到一边、还得横着绕回来。传了
+        spine_x 后, 锚点先横向收到主轴 x (纬度 y 不动), 再 BFS 吸附
+        到主轴路上的可走格, 路线就沿主轴 (南北向大路) 走, 不横着走。
+        spine_x 由调用方从 OSM 数据算 (比如主城门建筑的中心 x),
+        不是写死的坐标。
     返回: [{"x": int, "y": int}, ...] 去重连续点。
     """
     w, h = grid_size
     if not route_pts_lnglat:
         return []
     fpts = _project_floats(route_pts_lnglat, bbox, grid_size)
+    if spine_x is not None:
+        # 锚点偏离主轴时, 先横向收到主轴 x (纬度不动), 再 BFS 吸附。
+        fpts = [(float(spine_x), fy) for (_fx, fy) in fpts]
     if len(fpts) == 1:
         gx, gy = snap_to_passable(grid, fpts[0][0], fpts[0][1])
         return [{"x": gx, "y": gy}]
