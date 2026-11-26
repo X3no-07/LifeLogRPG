@@ -1,4 +1,4 @@
-"""OSM Overpass API 客户端
+"""OSM 数据客户端
 
 OpenStreetMap 开放地理数据, 用于:
 - 路网 (highway way)
@@ -6,10 +6,14 @@ OpenStreetMap 开放地理数据, 用于:
 - 水系 (waterway / natural=water way)
 - 绿化 (leisure=park, landuse=grass way)
 
-API: https://overpass-api.de/api/interpreter
-- 公共实例, 无需 key
-- 限制: 单次 10MB, 推荐 bbox < 1km x 1km
-- 坐标系: WGS84 (跟高德 GCJ-02 差 ~50-500m, 中国境内)
+数据源 (按优先级):
+1. OSM API (https://api.openstreetmap.org/api/0.6/map?bbox=...)
+   主源: 实测 1-3 秒返回, 稳定。返回 XML, 转成 Overpass 风格的
+   dict 后复用 parse_overpass 解析。限制: bbox 单边 < 0.25°、
+   最多 50000 个节点, 超了走 Overpass。
+2. Overpass (https://overpass-api.de/api/interpreter 等)
+   备用: 公共实例常超时/限流, 仅当 OSM API 不可用时用。
+   坐标系: WGS84 (跟高德 GCJ-02 差 ~50-500m, 中国境内)
 
 WGS84 vs GCJ-02 转换:
 - 火星坐标系 (GCJ-02) 是中国加密坐标, OSM 用的是 WGS84
@@ -18,9 +22,13 @@ WGS84 vs GCJ-02 转换:
 """
 import json
 import sys
+import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional, Tuple
 
 # API endpoints
+OSM_API_URL = "https://api.openstreetmap.org/api/0.6/map"
+# OSM API 单次 bbox 上限 (超了返回 400), 超了走 Overpass
+OSM_API_MAX_BBOX_DEG = 0.25
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",  # 主
     "https://overpass.kumi.systems/api/interpreter",  # 备用
@@ -105,10 +113,73 @@ class OsmClient:
         print(f"[osm] 全部 URL 失败: {last_err}")
         return None
 
+    def query_osm_api(self, bbox: Tuple[float, float, float, float]) -> Optional[Dict[str, Any]]:
+        """OSM API 拉 bbox 内全部数据 (主源)。
+        bbox: (min_lat, min_lng, max_lat, max_lng)。
+        返回 Overpass 风格的 dict (可直接喂 parse_overpass),
+        失败/超限返回 None 让上层走 Overpass。
+        """
+        if not self.enabled():
+            return None
+        min_lat, min_lng, max_lat, max_lng = bbox
+        if (max_lat - min_lat) > OSM_API_MAX_BBOX_DEG or (max_lng - min_lng) > OSM_API_MAX_BBOX_DEG:
+            self._log(f"OSM API 跳过: bbox 超 {OSM_API_MAX_BBOX_DEG}°")
+            return None
+        # OSM API 的 bbox 顺序是 min_lng,min_lat,max_lng,max_lat
+        url = (f"{OSM_API_URL}?bbox={min_lng},{min_lat},{max_lng},{max_lat}")
+        headers = {"User-Agent": "LifeLogRPG-Baker/0.2 (https://github.com/lifielogrpg)"}
+        try:
+            self._log(f"GET {url}")
+            r = self._requests.get(url, headers=headers, timeout=self.timeout)
+            if r.status_code != 200:
+                self._log(f"  HTTP {r.status_code}: {r.text[:200]}")
+                return None
+            return parse_osm_api_xml(r.text)
+        except Exception as e:
+            self._log(f"  error: {e}")
+            return None
+
     def query_bbox(self, bbox: Tuple[float, float, float, float]) -> Optional[Dict[str, Any]]:
-        """bbox 范围拉所有相关 way"""
+        """bbox 范围拉所有相关 way。
+        先试 OSM API (快、稳), 失败再走 Overpass。
+        """
+        raw = self.query_osm_api(bbox)
+        if raw is not None and raw.get("elements"):
+            return raw
+        if raw is not None:
+            self._log("OSM API 返回 0 元素, 改走 Overpass")
         ql = self.build_bbox_query(bbox)
         return self.query(ql)
+
+
+# ----------------------------------------------------------------------------
+#  OSM API XML -> Overpass 风格 dict (复用 parse_overpass)
+# ----------------------------------------------------------------------------
+
+def parse_osm_api_xml(xml_text: str) -> Dict[str, Any]:
+    """把 OSM API 的 XML 转成 {"elements": [...]}。
+    node -> {"type": "node", "id", "lat", "lon"}
+    way  -> {"type": "way", "id", "nodes": [ref...], "tags": {k: v}}
+    relation 不参与烘焙, 跳过。
+    """
+    root = ET.fromstring(xml_text)
+    elements: List[Dict[str, Any]] = []
+    for node in root.findall("node"):
+        elements.append({
+            "type": "node",
+            "id": int(node.get("id", "0")),
+            "lat": float(node.get("lat", "0")),
+            "lon": float(node.get("lon", "0")),
+        })
+    for way in root.findall("way"):
+        tags = {t.get("k", ""): t.get("v", "") for t in way.findall("tag")}
+        elements.append({
+            "type": "way",
+            "id": int(way.get("id", "0")),
+            "nodes": [int(nd.get("ref", "0")) for nd in way.findall("nd")],
+            "tags": tags,
+        })
+    return {"elements": elements}
 
 
 # ----------------------------------------------------------------------------
