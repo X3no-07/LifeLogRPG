@@ -427,49 +427,72 @@ class TextMode(BaseMode):
         return []
 
     def _fuzzy_extract_via_amap(self) -> List[str]:
-        """调高德 place_text 把日志里所有可能的 2-12 字符串都查一遍, 匹配上的保留
-        比正则准 (高德能识别 "南锣鼓巷", "国贸 CBD" 等)
+        """调高德 place_text 把日志里可能的地点片段查一遍, 匹配上的保留。
+        精度规则 (通用, 不针对某条路线):
+        - 候选按长度从长到短查, 真地名 (3-8 字) 先于 2 字碎片;
+        - 接受条件: 3 字以上要求 POI 名等于候选或以候选开头
+          (防 "鑫花园" 错配成 "金鑫花园" 这类中间子串),
+          2 字只接受名字完全相等 (防 "市齐" 错配成公司名);
+        - 城市名本身不算地点 (防 "济宁" 变成 "济宁市" 占一个点);
+        - 查完所有候选再按在日志里的出现顺序排, 不中途停。
         """
         if not self.amap.enabled():
             return []
-        # 1) 提取所有可能的 2-12 中文字符串
         candidates = self._extract_candidate_strings(self.text)
         if not candidates:
             return []
         print(f"[text] fuzzy: 尝试 {len(candidates)} 个候选")
-        out: List[str] = []
-        seen = set()
+        # real_name -> 首次在日志里的位置 (用于按路线顺序排)
+        found: Dict[str, int] = {}
         for c in candidates:
-            if c in seen:
-                continue
-            seen.add(c)
             loc = self.amap.place_text(c, city=self.default_city)
-            if loc:
-                lng, lat, real_name = loc
-                out.append(real_name)
-                print(f"[text]   ✓ {c} -> {real_name} ({lng:.4f}, {lat:.4f})")
-            if len(out) >= 8:  # 最多 8 个
-                break
-        return out
+            if not loc:
+                continue
+            lng, lat, real_name = loc
+            # 城市名本身不算地点
+            if real_name == self.default_city or real_name == self.default_city + "市":
+                continue
+            # 接受条件: 长候选允许"开头匹配", 2 字只允许完全相等
+            if len(c) >= 3:
+                if not (real_name == c or real_name.startswith(c)):
+                    continue
+            else:
+                if real_name != c:
+                    continue
+            if real_name in found:
+                continue
+            pos = self.text.find(real_name)
+            if pos < 0:
+                pos = self.text.find(c)
+            found[real_name] = pos if pos >= 0 else 1 << 30
+            print(f"[text]   ✓ {c} -> {real_name} ({lng:.4f}, {lat:.4f})")
+        # 按在日志里的出现顺序排 (起点在前、终点在后)
+        return sorted(found, key=lambda name: found[name])
 
     @staticmethod
     def _extract_candidate_strings(text: str) -> List[str]:
-        """从 text 提取所有 2-12 字符的"可能地名"片段
+        """从 text 提取"可能地名"片段, 按长度从长到短排。
         算法:
-        - 按非中文/标点切分
-        - 滑窗 2-12 字符
-        - 过滤掉含动词的
+        - 按非中文切分, 不截断 token (旧正则 {2,15} 会把 16 字日志
+          截成 15 字, 丢掉末尾的 "街" 这类字);
+        - 滑窗 3-8 字 (真地名多在这个范围), 长的先查;
+        - 2 字片段排最后当兜底 (单独查 2 字极易错配, 必须后查
+          且 _fuzzy_extract_via_amap 里只接受名字完全相等)。
         """
-        # 切分: 标点/数字/字母/连接词
-        tokens = re.findall(r'[\u4e00-\u9fff]{2,15}', text)
+        tokens = re.findall(r'[\u4e00-\u9fff]{2,}', text)
         cands: List[str] = []
         for t in tokens:
-            # 滑窗 2..min(12, len(t))
-            for n in range(2, min(13, len(t) + 1)):
+            # 3-8 字窗口, 从长到短
+            for n in range(min(8, len(t)), 2, -1):
                 for i in range(0, len(t) - n + 1):
                     s = t[i:i + n]
                     if s not in cands:
                         cands.append(s)
+            # 2 字兜底, 排最后
+            for i in range(0, len(t) - 1):
+                s = t[i:i + 2]
+                if s not in cands:
+                    cands.append(s)
         return cands[:80]  # 限制候选数 (防 API 限额)
 
     def _geocode_all(self, places: List[str]) -> List[Dict[str, Any]]:
