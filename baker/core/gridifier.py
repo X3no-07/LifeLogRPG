@@ -725,6 +725,49 @@ def route_along_roads(route_pts_lnglat: List[Tuple[float, float]],
     return ded
 
 
+def split_transport_at_gate(waypoints: List[Dict[str, int]],
+                            gate_nodes_lnglat: List[Tuple[float, float]],
+                            bbox: Tuple[float, float, float, float],
+                            grid_size: Tuple[int, int],
+                            outside: str = "driving",
+                            inside: str = "walking",
+                            ) -> List[Dict[str, Any]]:
+    """按城门给路线分段交通工具: 过城门前 outside, 过城门后 inside。
+
+    道理: 开车只能到宫门口 (城门), 进宫城只能步行, 不能开车进故宫。
+    分段点按 OSM 算, 不是写死坐标/点号: 把城门建筑 (OSM 节点) 投到
+    网格取包围盒, 路线第一次进入包围盒的那一点就是进宫的点, 从那
+    点起步行, 之前开车。路线没进包围盒时全段 outside (不硬切)。
+
+    waypoints: route_along_roads 出的 [{"x": int, "y": int}, ...]
+    gate_nodes_lnglat: 城门建筑的 OSM 节点 [(lng, lat), ...] WGS84
+        (比如 parse_overpass 的 buildings 里 name 含"午门"那栋的 nodes)
+    返回: [{"x": int, "y": int, "transport": str}, ...]
+        transport 取值跟 schema.Waypoint.transport 一致
+        (walking/driving/transit/bicycling)。
+    """
+    if not waypoints:
+        return []
+    if not gate_nodes_lnglat:
+        return [{**p, "transport": outside} for p in waypoints]
+    fpts = _project_floats(gate_nodes_lnglat, bbox, grid_size)
+    xs = [fx for fx, _fy in fpts]
+    ys = [fy for _fx, fy in fpts]
+    gx_min, gx_max = min(xs), max(xs)
+    gy_min, gy_max = min(ys), max(ys)
+    split = None
+    for i, p in enumerate(waypoints):
+        if gx_min <= p["x"] <= gx_max and gy_min <= p["y"] <= gy_max:
+            split = i
+            break
+    if split is None:
+        return [{**p, "transport": outside} for p in waypoints]
+    out: List[Dict[str, Any]] = []
+    for i, p in enumerate(waypoints):
+        out.append({**p, "transport": inside if i >= split else outside})
+    return out
+
+
 def carve_route_passages(grid: Grid, waypoints: List[Dict[str, int]],
                          building_heights: List[List[int]] = None) -> int:
     """把路线上穿过的楼/水格刻成路 (原地修改 grid, 返回刻了几格)。

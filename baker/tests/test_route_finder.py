@@ -16,7 +16,7 @@ from baker.clients.osm import parse_overpass
 from baker.core.gridifier import (
     osm_to_grid, densify_and_snap_route,
     _route_cell_cost, snap_to_passable, find_path_on_grid,
-    route_along_roads, apply_path_overlay,
+    route_along_roads, apply_path_overlay, split_transport_at_gate,
     CELL_GRASS, CELL_ROAD, CELL_BUILDING, CELL_WATER, CELL_TREE,
     CELL_SIDEWALK, CELL_PLAZA,
 )
@@ -467,3 +467,50 @@ class TestRouteAlongRoadsWater:
         assert len(route) >= 2
         assert route[0] == {"x": 1, "y": 6} and route[-1] == {"x": 19, "y": 6}
         assert all(p["y"] <= 5 for p in route[1:-1]), route
+
+
+class TestSplitTransportAtGate:
+    """split_transport_at_gate: 按城门分段交通工具 (baker/core/gridifier.py)
+
+    道理: 开车只能到宫门口, 进宫城只能步行。分段点按 OSM 城门建筑
+    的包围盒算, 不是写死坐标/点号。
+    """
+
+    def test_splits_at_gate_bbox(self):
+        # 南北向路线 x=10, y 18->2 (向北); 城门包围盒 x 8-12, y 8-12。
+        # 投影: fx=lng*20, fy=(1-lat)*20。城门节点 lng 0.4-0.6,
+        # lat 0.4-0.6 -> fx 8-12, fy 8-12。
+        gate = [(0.4, 0.4), (0.6, 0.4), (0.6, 0.6), (0.4, 0.6)]
+        bbox = (0.0, 0.0, 1.0, 1.0)
+        wps = [{"x": 10, "y": y} for y in (18, 16, 14, 12, 10, 8, 6, 4, 2)]
+        out = split_transport_at_gate(wps, gate, bbox, (20, 20))
+        # 第一次进包围盒是 y=12 (idx 3); 之前开车, 从那点起步行,
+        # 出了包围盒往北 (y<8) 也还是步行
+        assert [p["transport"] for p in out] == (
+            ["driving"] * 3 + ["walking"] * 6), out
+        assert [(p["x"], p["y"]) for p in out] == [(10, y) for y in (18, 16, 14, 12, 10, 8, 6, 4, 2)]
+
+    def test_gate_moves_split_moves(self):
+        # 城门换到 y 14-16 处, 分段点跟着动 (不是写死点号)
+        gate = [(0.4, 0.3), (0.6, 0.3), (0.6, 0.2), (0.4, 0.2)]
+        bbox = (0.0, 0.0, 1.0, 1.0)
+        wps = [{"x": 10, "y": y} for y in (18, 16, 14, 12, 10, 8, 6, 4, 2)]
+        out = split_transport_at_gate(wps, gate, bbox, (20, 20))
+        # 城门 fy=(1-lat)*20: lat 0.2-0.3 -> fy 14-16, 第一次进是 y=16 (idx 1)
+        assert [p["transport"] for p in out] == (
+            ["driving"] * 1 + ["walking"] * 8), out
+
+    def test_no_gate_crossing_all_outside(self):
+        # 路线在 x=2, 根本不进城门包围盒 (x 8-12): 全段开车, 不硬切
+        gate = [(0.4, 0.4), (0.6, 0.4), (0.6, 0.6), (0.4, 0.6)]
+        bbox = (0.0, 0.0, 1.0, 1.0)
+        wps = [{"x": 2, "y": y} for y in (18, 12, 6, 2)]
+        out = split_transport_at_gate(wps, gate, bbox, (20, 20))
+        assert [p["transport"] for p in out] == ["driving"] * 4, out
+
+    def test_empty_and_no_gate(self):
+        bbox = (0.0, 0.0, 1.0, 1.0)
+        assert split_transport_at_gate([], [(0.4, 0.4)], bbox, (20, 20)) == []
+        wps = [{"x": 10, "y": 18}, {"x": 10, "y": 2}]
+        out = split_transport_at_gate(wps, [], bbox, (20, 20))
+        assert [p["transport"] for p in out] == ["driving", "driving"]
