@@ -110,7 +110,8 @@ class TextMode(BaseMode):
         # 3 + 4) 调路径 (P0.4 自适应切片)
         #   - walking/bicycling 段: polyline 加到 walking_pts (街道级, 用于切片)
         #   - driving/transit 段: 不加到 walking_pts, 改存为 transit_marker (pin 显示)
-        #   - all_waypoints_px 仍记全部, 用于 path 动画
+        #   - all_waypoints_px 仍记全部, 仅用于无步行段时的切片 fallback,
+        #     不再进 path (driving/transit 端点进 path 会在试玩里连成斜线)
         # 高德返回的是 GCJ-02: route 入参和距离估算直接用它,
         # 切片/投影一律用转成 WGS84 的 coords_wgs (OSM 是 WGS84)
         coords = [(g["lng"], g["lat"]) for g in geo_results]
@@ -118,7 +119,7 @@ class TextMode(BaseMode):
         all_waypoints_px: List[Tuple[float, float]] = []
         walking_pts: List[Tuple[float, float]] = []   # 仅街道级 (用于 bbox 切片)
         seg_durations: List[float] = []               # 每段时长 (秒), 给 waypoint 计时用
-        seg_modes: List[str] = []                     # 每段 mode, 给 transit teleport 用
+        seg_modes: List[str] = []                     # 每段 mode, 给 walking/transit 时长分段用
         seg_routes: List[Optional[Dict[str, Any]]] = []  # 缓存 route 结果, 避免重复 API
         waypoint_metas: List[Dict[str, str]] = []
 
@@ -338,16 +339,16 @@ class TextMode(BaseMode):
             p.map.grid = build_grid_from_waypoints(path_waypoints_grid, p.map.width, p.map.height)
 
         # 8) 组装 waypoint + meta
-        # P0.4: 时间分布分两段 — walking 段时间 + transit 段时间
-        # - walking waypoints: time = ratio * walking_total
-        # - transit teleport waypoints: time = walking_total + transit_offset
+        # path 只含步行/骑行点, 总时长 = walking 段时长。
+        # driving/transit 段不进 path (此前把两端当 teleport waypoint 追加进
+        # p.path, Godot 会在两点间直线插值, 在试玩里画出一条横跨地图的斜线);
+        # 开车/公交段的信息保留在 p.transit_markers 里, 不丢失。
         walking_total = sum(d for d, m in zip(seg_durations, seg_modes) if m in ("walking", "bicycling"))
         transit_total = sum(d for d, m in zip(seg_durations, seg_modes) if m in ("transit", "driving"))
 
         # walking 段: waypoint 沿 path, time = ratio * walking_total
         # 注意: walking_pts 包含 pure walking + transit 的 walking sub-segments
         # 它们在视觉上都是在街道上走, 所以都标 walking
-        # 真正的 transit 切换发生在 t=walking_total 之后的 depart/arrive teleport waypoint
         n = len(path_waypoints_grid)
         for i, wp in enumerate(path_waypoints_grid):
             ratio = i / max(n - 1, 1)
@@ -358,43 +359,14 @@ class TextMode(BaseMode):
             p.path.append(Waypoint(
                 x=wp["x"], y=wp["y"], t=t,
                 label=meta.get("label", f"pt_{i}"),
-                transport="walking",   # P0.4: walking_pts 都标 walking, transit 切换由 teleport 触发
+                transport="walking",   # path 里只有步行/骑行点, transit 段见 transit_markers
             ))
-
-        # transit 段: 加 2 个 teleport waypoint (start + end)
-        # - start waypoint: t=walking_total+cumulative_transit_so_far, position=start_grid
-        #   (实际站在灵境胡同, transport=transit, 角色开始 "上车")
-        # - end waypoint: t=walking_total+cumulative_transit_so_far+seg_dur, position=end_grid
-        #   (实际到达西二旗, transport=transit, 角色 "下车")
-        # 这样 Godot 端的 character 会在 2 个 teleport 点之间插值, 持续 seg_dur 秒
-        # transport.gd 会在 transport 变化时 (walking -> transit) 触发 fade 动画
-        tm_iter = iter(p.transit_markers)
-        transit_offset = 0.0
-        for i, mode in enumerate(seg_modes):
-            if mode in ("transit", "driving"):
-                tm = next(tm_iter, None)
-                if tm:
-                    # start waypoint: 紧接 walking 末, 站在上一段终点
-                    p.path.append(Waypoint(
-                        x=tm.start_grid_x, y=tm.start_grid_y,
-                        t=walking_total + transit_offset,
-                        label=tm.name + "_depart",
-                        transport=mode,
-                    ))
-                    # end waypoint: 走完 seg_dur, 到达 transit 终点
-                    p.path.append(Waypoint(
-                        x=tm.end_grid_x, y=tm.end_grid_y,
-                        t=walking_total + transit_offset + seg_durations[i],
-                        label=tm.name + "_arrive",
-                        transport=mode,
-                    ))
-                transit_offset += seg_durations[i]
 
         # 按 t 排序
         p.path.sort(key=lambda w: w.t)
-        cum_time = walking_total + transit_total
+        cum_time = walking_total
         print(f"[text] Path waypoints: {len(p.path)} (walking={walking_total:.0f}s, "
-              f"transit={transit_total:.0f}s, total={cum_time:.0f}s)")
+              f"transit={transit_total:.0f}s 未计入 path/总时长, total={cum_time:.0f}s)")
 
         # 9) LLM 生成 meta + dialogs
         place_names = [g["name"] for g in geo_results]
@@ -403,7 +375,18 @@ class TextMode(BaseMode):
         p.meta.mood = llm_meta.get("mood", "calm")
         p.meta.bgm = llm_meta.get("bgm", "")
         raw_dialogs = llm_meta.get("dialogs", [])
+        # 对白时间按总时长 (cum_time, 仅步行段) 归一: LLM 回 t_offset 时
+        # normalize 直接按比例换算, 天然落在总时长内, 无需重新生成。
         normalized = normalize_dialog_times(raw_dialogs, cum_time)
+        # 兜底: LLM 若回的是绝对秒数 t (而非 t_offset), normalize 会原样保留,
+        # 超出总时长时按比例整体压缩, 保证对白时间点始终落在总时长内。
+        max_dt = max((d.get("t", 0) for d in normalized), default=0)
+        if max_dt > cum_time > 0:
+            scale = cum_time / max_dt
+            for d in normalized:
+                d["t"] = round(d.get("t", 0) * scale, 2)
+            print(f"[text] 对白时间超出总时长, 按比例压缩 "
+                  f"{max_dt:.1f}s -> {cum_time:.1f}s")
         for d in normalized:
             p.dialogs.append(Dialog(
                 t=d.get("t", 0), speaker=d.get("speaker", "Me"), text=d.get("text", "")
