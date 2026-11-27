@@ -83,7 +83,7 @@ def _default_config() -> Dict[str, Any]:
         },
         "bake": {
             "output_dir": str(PROJECT_ROOT / "saved_logs"),
-            "tile_size_px": 16, "viewport_grid_w": 160, "viewport_grid_h": 120,
+            "tile_size_px": 16, "viewport_grid_w": 320, "viewport_grid_h": 240,
             "default_city": "北京", "weather_seed": 42,
             "llm_provider": "deepseek",
         },

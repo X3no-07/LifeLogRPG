@@ -179,7 +179,59 @@ def parse_osm_api_xml(xml_text: str) -> Dict[str, Any]:
             "nodes": [int(nd.get("ref", "0")) for nd in way.findall("nd")],
             "tags": tags,
         })
+    # relation 也要留着: 大湖 / 大公园常用 multipolygon relation 表示,
+    # 外环 way 本身常无标签, 只看 way 会丢整个湖 (如西湖 relation 2308774)。
+    # parse_overpass 会把 natural=water 的 multipolygon 拼回 water。
+    for rel in root.findall("relation"):
+        tags = {t.get("k", ""): t.get("v", "") for t in rel.findall("tag")}
+        elements.append({
+            "type": "relation",
+            "id": int(rel.get("id", "0")),
+            "members": [{"type": m.get("type", ""),
+                         "ref": int(m.get("ref", "0")),
+                         "role": m.get("role", "")}
+                        for m in rel.findall("member")],
+            "tags": tags,
+        })
     return {"elements": elements}
+
+
+def _stitch_rings(member_lists: List[List[Tuple[float, float]]]
+                  ) -> List[List[Tuple[float, float]]]:
+    """把多边形 relation 的成员 way (节点坐标列) 按端点拼成闭合环。
+    成员顺序 / 方向任意, 按端点相等拼接 (正接 / 反接 / 头接);
+    拼不上的段各自成环返回 (不丢数据, 调用方按点数过滤)。
+    闭合环首尾同点。"""
+    segs = [list(m) for m in member_lists if len(m) >= 2]
+    rings: List[List[Tuple[float, float]]] = []
+    while segs:
+        ring = segs.pop(0)
+        changed = True
+        while changed:
+            changed = False
+            for i, s in enumerate(segs):
+                if s[0] == ring[-1]:
+                    ring.extend(s[1:])
+                    segs.pop(i)
+                    changed = True
+                    break
+                if s[-1] == ring[-1]:
+                    ring.extend(reversed(s[:-1]))
+                    segs.pop(i)
+                    changed = True
+                    break
+                if s[-1] == ring[0]:
+                    ring = s[:-1] + ring
+                    segs.pop(i)
+                    changed = True
+                    break
+                if s[0] == ring[0]:
+                    ring = list(reversed(s[1:])) + ring
+                    segs.pop(i)
+                    changed = True
+                    break
+        rings.append(ring)
+    return rings
 
 
 # ----------------------------------------------------------------------------
@@ -280,6 +332,43 @@ def parse_overpass(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
                     "name": tags.get("name", ""),
                     "nodes": coords,
                 })
+    # multipolygon 水体 (只处理 natural=water / waterway 的 relation):
+    # 大湖的外环常是 25+ 条无标签 way, 只看 way 会丢整个湖。外环按端点
+    # 拼成闭合环进 water, 内环 (堤 / 岛) 挂 holes, 栅格化与渲染时抠回陆地。
+    # 只认水, 不认别的 multipolygon (行政区划、建筑群等不管)。
+    ways_by_id: Dict[str, List[Tuple[float, float]]] = {}
+    for el in elements:
+        if el.get("type") != "way":
+            continue
+        coords = [nodes_by_id[str(nid)] for nid in el.get("nodes", [])
+                  if str(nid) in nodes_by_id]
+        if len(coords) >= 2:
+            ways_by_id[str(el["id"])] = coords
+    for el in elements:
+        if el.get("type") != "relation":
+            continue
+        tags = el.get("tags", {})
+        if tags.get("type") != "multipolygon":
+            continue
+        if tags.get("natural") != "water" and "waterway" not in tags:
+            continue
+        members = el.get("members", []) or []
+        outers = [ways_by_id[str(m["ref"])] for m in members
+                  if m.get("type") == "way" and m.get("role") == "outer"
+                  and str(m.get("ref")) in ways_by_id]
+        inners = [ways_by_id[str(m["ref"])] for m in members
+                  if m.get("type") == "way" and m.get("role") == "inner"
+                  and str(m.get("ref")) in ways_by_id]
+        holes = [ring for ring in _stitch_rings(inners) if len(ring) >= 3]
+        for ring in _stitch_rings(outers):
+            if len(ring) < 3:
+                continue
+            water.append({
+                "type": "lake",
+                "name": tags.get("name", ""),
+                "nodes": ring,
+                "holes": holes,
+            })
     return {"roads": roads, "buildings": buildings, "water": water,
             "green": green, "ground": ground}
 

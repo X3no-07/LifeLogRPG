@@ -10,7 +10,7 @@ from .base import BaseMode
 
 
 class MockMode(BaseMode):
-    """160x120 grid + 直线+拐弯路径, 5 条对话"""
+    """320x240 grid + 直线+拐弯路径, 5 条对话"""
 
     PATH_PIXELS = [
         (5, 10), (10, 10), (15, 10), (20, 10), (25, 10),

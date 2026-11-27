@@ -1,7 +1,7 @@
 """沿路网寻路测试: 锚点吸附 + A* 沿路走 + 加密 (baker 源代码改动, 不针对某一座城)
 
 覆盖 (baker/core/gridifier.py 新增):
-- _route_cell_cost: 路/广场/人行道 1, 草 4, 树 8, 楼/水/POI 不可走
+- _route_cell_cost: 路/广场/人行道 1, 草 20, 树 40, 楼/水/POI 不可走
 - snap_to_passable: 最近的可走格 (BFS, 不限半径)
 - find_path_on_grid: A* 八方向 + 斜走不切角, 全程不进楼不进水
 - route_along_roads: 锚点吸附 + 逐段 A* + 加密成路线点
@@ -17,7 +17,7 @@ from baker.core.gridifier import (
     osm_to_grid, densify_and_snap_route,
     _route_cell_cost, snap_to_passable, find_path_on_grid,
     route_along_roads, apply_path_overlay, split_transport_at_gate,
-    smooth_path_on_grid, _segment_crosses_blocked,
+    smooth_path_on_grid, _segment_crosses_blocked, _straight_line_cells,
     CELL_GRASS, CELL_ROAD, CELL_BUILDING, CELL_WATER, CELL_TREE,
     CELL_SIDEWALK, CELL_PLAZA,
 )
@@ -41,8 +41,8 @@ class TestRouteCellCost:
         assert _route_cell_cost(CELL_ROAD) == 1.0
         assert _route_cell_cost(CELL_PLAZA) == 1.0
         assert _route_cell_cost(CELL_SIDEWALK) == 1.0
-        assert _route_cell_cost(CELL_GRASS) == 4.0
-        assert _route_cell_cost(CELL_TREE) == 8.0
+        assert _route_cell_cost(CELL_GRASS) == 20.0
+        assert _route_cell_cost(CELL_TREE) == 40.0
         assert _route_cell_cost(CELL_BUILDING) is None
         assert _route_cell_cost(CELL_WATER) is None
         assert _route_cell_cost(6) is None  # POI 标记不可走
@@ -177,13 +177,32 @@ class TestAstarCellCost:
     def test_costs(self):
         from baker.core.gridifier import _astar_cell_cost
         assert _astar_cell_cost(CELL_ROAD) == 1.0
-        assert _astar_cell_cost(CELL_GRASS) == 4.0
-        assert _astar_cell_cost(CELL_TREE) == 8.0
+        assert _astar_cell_cost(CELL_GRASS) == 20.0
+        assert _astar_cell_cost(CELL_TREE) == 40.0
         # 有路穿过的楼/水 (门洞、桥) 便宜穿; 实心楼/水贵穿
         assert _astar_cell_cost(CELL_BUILDING, on_road=True) == 20.0
         assert _astar_cell_cost(CELL_BUILDING, on_road=False) == 500.0
         assert _astar_cell_cost(CELL_WATER, on_road=True) == 20.0
         assert _astar_cell_cost(CELL_WATER, on_road=False) == 500.0
+
+    def test_astar_prefers_road_over_grass_shortcut(self):
+        """A* 宁可绕路也不横切草坪: 草地直穿更短, 但代价 20/格,
+        绕路的路代价 1/格, 必须选绕路。"""
+        # 10x6: 上下两条路, 中间是草坪; 起点左上, 终点右下。
+        # 直穿草坪约 9 格 (代价 ~180); 沿路绕行约 16 格 (代价 ~16)。
+        g = _grid("rrrrrrrrrr",
+                  "r........r",
+                  "r........r",
+                  "r........r",
+                  "r........r",
+                  "rrrrrrrrrr")
+        p = find_path_on_grid(g, (0, 0), (9, 5))
+        assert p, "应找到路"
+        # 路径上除起点/终点所在路格外, 不应进草地
+        grass_cells = [(x, y) for x, y in p if g[y][x] == CELL_GRASS]
+        assert grass_cells == [], f"A* 横切草坪: {grass_cells}"
+        # 应沿着路走: 全部在路格上
+        assert all(g[y][x] == CELL_ROAD for x, y in p)
 
 
 class TestRoadProximityMask:
@@ -656,3 +675,49 @@ class TestSmoothPathOnGrid:
             d_v = min(_math.hypot(mx - 10, my - y) for y in range(11))
             d_to_L = min(d_h, d_v)
             assert d_to_L <= 3.5, (a, b, d_to_L)
+
+    def test_grass_field_not_cut(self):
+        # L 形路绕草坪: 直线抄近道会横切草地, 拐点必须保留、路线贴路走
+        # (回归: 旧版 blocked 只拦楼/水, 直线切草坪也被当成可走)
+        g = _grid("r.........",
+                  "r.........",
+                  "r.........",
+                  "r.........",
+                  "rrrrrrrrrr")
+        # 沿 L 形路走: 左侧竖路南下, 再沿底路向东
+        wps = [{"x": 0, "y": y} for y in range(5)]
+        wps += [{"x": x, "y": 4} for x in range(1, 10)]
+        out = smooth_path_on_grid(wps, g)
+        assert out[0] == {"x": 0, "y": 0} and out[-1] == {"x": 9, "y": 4}
+        # 直线 (0,0)->(9,4) 横切草坪, 必须被挡住
+        assert _segment_crosses_blocked(g, 0, 0, 9, 4)
+        # 拐角 (0,4) 必须留下来, 不能直接从起点连到终点
+        assert any(p["x"] == 0 and p["y"] == 4 for p in out)
+        assert len(out) > 2
+        # 每段直线只走路/广场/人行道, 不进草/树/楼/水
+        for a, b in zip(out, out[1:]):
+            assert not _segment_crosses_blocked(g, a["x"], a["y"], b["x"], b["y"])
+
+    def test_smoothed_stays_on_road_or_plaza(self):
+        # 端到端: 带草坪/树/楼的路网, A* + 平滑后每段只走路/广场/人行道
+        g = _grid("rrrrr.....",
+                  "r...rrrrr.",
+                  "r...r...r.",
+                  "r...r.tt..",
+                  "rrrrr...r.",
+                  "....rrrrr.",
+                  "....r.....",
+                  "ppppprrrrr")
+        # 从左上到右下: A* 会沿路走 (草 4、树 8, 路 1, 优先贴路)
+        raw = find_path_on_grid(g, (0, 0), (9, 7))
+        assert raw, "A* 应该找得到路"
+        wps = [{"x": x, "y": y} for x, y in raw]
+        out = smooth_path_on_grid(wps, g)
+        assert out[0] == {"x": 0, "y": 0} and out[-1] == {"x": 9, "y": 7}
+        assert len(out) < len(wps)
+        paved = {CELL_ROAD, CELL_PLAZA, CELL_SIDEWALK}
+        for a, b in zip(out, out[1:]):
+            assert not _segment_crosses_blocked(g, a["x"], a["y"], b["x"], b["y"])
+            # 逐格复核: 每段直线上的每个格子都是铺装面
+            for (x, y) in _straight_line_cells(a["x"], a["y"], b["x"], b["y"]):
+                assert g[y][x] in paved, (a, b, x, y, g[y][x])

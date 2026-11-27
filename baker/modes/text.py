@@ -127,10 +127,16 @@ class TextMode(BaseMode):
         has_subway = any(kw in self.text for kw in SUBWAY_KW)
         has_drive = any(kw in self.text for kw in DRIVE_KW)
         has_bike = any(kw in self.text for kw in BIKE_KW)
+        first_walk_i: Optional[int] = None  # 第一段步行 / 骑行段的起点下标
+        last_walk_j: Optional[int] = None   # 最后一段步行 / 骑行段的段下标
 
         for i in range(len(coords) - 1):
             approx_km = approx_distance_km(coords[i], coords[i + 1])
             mode = self._pick_transport(approx_km, has_subway, has_drive, has_bike)
+            if mode in ("walking", "bicycling"):
+                if first_walk_i is None:
+                    first_walk_i = i
+                last_walk_j = i
             print(f"[text]   {geo_results[i]['name']} -> {geo_results[i + 1]['name']} "
                   f"({approx_km:.1f} km) 用 {mode}")
             route = self.amap.route(coords[i], coords[i + 1], mode=mode)
@@ -406,6 +412,20 @@ class TextMode(BaseMode):
             p.dialogs.append(Dialog(
                 t=d.get("t", 0), speaker=d.get("speaker", "Me"), text=d.get("text", "")
             ))
+
+        # 火红渲染上下文: write() 时自动画地图 (失败不丢 JSON)
+        # 起 / 终点名取步行段的端点 (第一段常是开车 / 公交, 如"杭州市",
+        # 步行实际从第二站开始, 不能拿 geo_results[0] 当起点名)。
+        _start = geo_results[first_walk_i]["name"] if first_walk_i is not None \
+            else (geo_results[0]["name"] if geo_results else "")
+        _end = geo_results[last_walk_j + 1]["name"] if last_walk_j is not None \
+            else (geo_results[-1]["name"] if geo_results else "")
+        self._render_ctx = {
+            "bbox": bbox,
+            "osm": parsed_osm,
+            "start_name": _start,
+            "end_name": _end,
+        }
 
         return p
 

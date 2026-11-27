@@ -37,8 +37,8 @@ class Meta:
 @dataclass
 class MapData:
     tile_size: int = 16            # 每格像素 (P0: 16)
-    width: int = 160               # 网格列数
-    height: int = 120              # 网格行数
+    width: int = 320               # 网格列数 (火红渲染器默认 320x240)
+    height: int = 240              # 网格行数
     # grid[y][x] = int 类型码: 0=grass 1=road 2=building 3=water 4=tree 5=sidewalk 6=poi 7=plaza
     grid: List[List[int]] = field(default_factory=list)
     # P1.2 建筑层数 (跟 grid 同步, 0=无建筑, N=N 层)

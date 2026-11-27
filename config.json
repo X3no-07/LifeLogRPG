@@ -42,8 +42,8 @@
   "bake": {
     "output_dir": "saved_logs",
     "tile_size_px": 16,
-    "viewport_grid_w": 160,
-    "viewport_grid_h": 120,
+    "viewport_grid_w": 320,
+    "viewport_grid_h": 240,
     "default_city": "北京",
     "llm_provider": "deepseek",
     "default_walk_speed_px_per_sec": 60.0,

@@ -223,11 +223,14 @@ def osm_to_grid(parsed_osm: Dict[str, List[Dict[str, Any]]],
         pts = _project_floats(g["nodes"], bbox, grid_size)
         _pil_poly(dr, pts, CELL_TREE, line_width=1)
 
-    # 3) water: 闭合填面, 开放画线 (宽 2)
+    # 3) water: 闭合填面, 开放画线 (宽 2); 多边形水体的内环 (堤/岛) 抠回底色
     for w_seg in parsed_osm.get("water", []):
         pts = _project_floats(w_seg["nodes"], bbox, grid_size)
         if _is_closed_poly(w_seg["nodes"]):
             _pil_poly(dr, pts, CELL_WATER)
+            for hole in w_seg.get("holes", []) or []:
+                hpts = _project_floats(hole, bbox, grid_size)
+                _pil_poly(dr, hpts, base)
         else:
             _pil_line(dr, pts, CELL_WATER, width=2)
 
@@ -446,14 +449,15 @@ def _seg_closest(px: float, py: float, ax: float, ay: float,
 
 def _route_cell_cost(cell: int):
     """进该格的代价; None = 不可走。
-    路/广场/人行道 1.0 (首选); 草地 4.0 (没路时可借道); 树 8.0;
-    楼/水/POI 标记不可走。"""
+    路/广场/人行道 1.0 (首选); 草地 20.0、树 40.0 (只在没路时借道,
+    绝不为抄近道横切草坪/树林, 路线必须贴着路走); 楼/水/POI 标记
+    不可走。"""
     if cell in (CELL_ROAD, CELL_PLAZA, CELL_SIDEWALK):
         return 1.0
     if cell == CELL_GRASS:
-        return 4.0
+        return 20.0
     if cell == CELL_TREE:
-        return 8.0
+        return 40.0
     return None
 
 
@@ -483,7 +487,7 @@ def snap_to_passable(grid: Grid, x: float, y: float) -> Tuple[int, int]:
 
 def _astar_cell_cost(cell: int, on_road: bool = False) -> float:
     """A* 进该格的代价。
-    路/广场/人行道 1.0; 草地 4.0; 树 8.0。
+    路/广场/人行道 1.0; 草地 20.0; 树 40.0 (只在没路时借道, 不抄近道)。
     楼/水原则上不可走, 但路网常被楼/水切断 (宫墙、门洞、河):
     - on_road=True (该格有 OSM 路穿过, 比如门洞、桥) -> 20.0,
       寻路会在这儿过, 且只走最窄的一处;
@@ -743,12 +747,15 @@ def _near_path_mask(pts, w: int, h: int, radius: float) -> set:
 
 
 def _segment_crosses_blocked(grid: Grid, x0: int, y0: int, x1: int, y1: int,
-                             blocked=(CELL_BUILDING, CELL_WATER),
+                             blocked=(CELL_BUILDING, CELL_WATER,
+                                      CELL_GRASS, CELL_TREE),
                              near_mask=None) -> bool:
-    """直线段 (x0,y0)->(x1,y1) 是否穿过楼/水格、或跑出原路径的走廊。
+    """直线段 (x0,y0)->(x1,y1) 是否穿过不可走的格子、或跑出原路径的走廊。
+    直线段只能走铺装面 (路/广场/人行道): 穿楼/水/草/树都算不可走,
+    拐弯抄近道切草坪、穿树林都不行, 路线必须贴着路走。
     采样 Bresenham 整数格; 起终点本身豁免 (它们是原路径上的点, 门洞那格
     本来就是楼格, 不能因此判整段不可走); 斜向步进时两边正交邻格也查,
-    不从楼角/水角斜切过去 (跟 find_path_on_grid 的不切角规则一致)。
+    不从楼角/水角/草角斜切过去 (跟 find_path_on_grid 的不切角规则一致)。
     near_mask: _near_path_mask() 的返回值 (没有就不限制偏离)。"""
     cells = _straight_line_cells(x0, y0, x1, y1)
     h = len(grid)
@@ -758,17 +765,21 @@ def _segment_crosses_blocked(grid: Grid, x0: int, y0: int, x1: int, y1: int,
             return True
         if near_mask is not None and (x, y) not in near_mask:
             return True
+    # 斜向步进的拐角检查只拦楼/水 (硬障碍): 拐角处贴草而过只是转弯,
+    # 线上的格子本身仍是路, 不算切草坪; 楼/水角斜切会蹭进楼里/水里。
+    _corner_blocked = (CELL_BUILDING, CELL_WATER)
     for (x, y), (nx, ny) in zip(cells, cells[1:]):
         dx, dy = nx - x, ny - y
         if dx and dy:
             for ox, oy in ((nx, y), (x, ny)):
-                if 0 <= ox < w and 0 <= oy < h and grid[oy][ox] in blocked:
+                if 0 <= ox < w and 0 <= oy < h and grid[oy][ox] in _corner_blocked:
                     return True
     return False
 
 
 def smooth_path_on_grid(waypoints: List[Dict[str, int]], grid: Grid,
-                        blocked=(CELL_BUILDING, CELL_WATER),
+                        blocked=(CELL_BUILDING, CELL_WATER,
+                                 CELL_GRASS, CELL_TREE),
                         max_deviation: float = 3.0,
                         ) -> List[Dict[str, int]]:
     """贪心视线法平滑逐格路径 (Bug 1: 路线楼梯状)。
@@ -776,7 +787,8 @@ def smooth_path_on_grid(waypoints: List[Dict[str, int]], grid: Grid,
     A* 出来的是逐格点列 (点距 1-2 格, 斜走 + 横平竖直交替 = 楼梯/
     锯齿), 试玩里红线和人物跟着楼梯走。从一点往前看, 能直线通到的
     最远点就直连, 跳过中间不必要的拐点。直线段要同时过两关才直连:
-    1) 不穿楼/水 (穿了就保留拐点, 绝不把路修进楼里/水里);
+    1) 只走铺装面 (路/广场/人行道), 不穿楼/水、不切草坪、不穿树林
+       (穿了就保留拐点, 路线必须贴着路走, 绝不抄近道横切草地);
     2) 不跑出原路径 max_deviation 格的走廊 (不抄近道横切街区、拐
        大弯离路太远, 平滑完还是顺着原来的路走)。
 
@@ -784,9 +796,9 @@ def smooth_path_on_grid(waypoints: List[Dict[str, int]], grid: Grid,
         (route_along_roads / densify_and_snap_route 的输出格式)
     grid: 干净网格 (osm_to_grid 的输出, 不带 path overlay; 没 OSM 时
         用 build_grid_from_waypoints 的输出也行)
-    blocked: 视线不可穿的 cell (默认楼/水; 草/树/路/广场都能穿,
-        只是拐个弯抄近道, 不会进楼进水)
-    max_deviation: 直线段离原路径最远几格 (默认 3 格, 160x120 图上
+    blocked: 视线不可穿的 cell (默认楼/水/草/树; 只有路/广场/人行道
+        能走, 草/树/楼/水都不能穿)
+    max_deviation: 直线段离原路径最远几格 (默认 3 格, 320x240 图上
         约 20 米, 够抹掉楼梯锯齿, 又不会拐大弯)
     返回: 原列表的子集 (同一批 dict, 首尾必留), 点变少、每段变长、
         顺着路的方向走。点数 <3 时原样返回。

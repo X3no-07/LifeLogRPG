@@ -279,4 +279,12 @@ class CoordsMode(BaseMode):
         print(f"[coords] Path waypoints: {len(p.path)} (walking={walking_total:.0f}s, "
               f"transit={transit_total:.0f}s)")
 
+        # 火红渲染上下文: write() 时自动画地图 (失败不丢 JSON)
+        self._render_ctx = {
+            "bbox": bbox,
+            "osm": parsed_osm,
+            "start_name": "",
+            "end_name": "",
+        }
+
         return p
