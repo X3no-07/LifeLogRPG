@@ -141,8 +141,39 @@ def test_mock_mode_constant_speed():
     assert max(speeds) - min(speeds) < 0.01, (
         f"每段速度应相等, 实测 min={min(speeds):.1f} max={max(speeds):.1f}")
     assert abs(speeds[0] - 60.0) < 0.01, "应按 bake 默认步行速度 60 px/s 走"
-    # 总时长约 29.3s (110 格 x 16px / 60), 对白 (4/12/18/28s) 都在总时长内
+    # 总时长约 29.3s (110 格 x 16px / 60)
     assert abs(payload.path[-1].t - 110 * 16 / 60.0) < 0.01
+
+
+def test_mock_dialogs_anchored_to_waypoints():
+    """Mock 对白时间戳必须挂在路径点上、落在总时长内: 之前是写死的
+    绝对秒数 (4/12/18/28/35), 老分法总时长才 28.5s、现在匀速总时长
+    29.33s, 35s 那句 ("走, 中午请你吃饭") 永远到不了。
+    修法: DIALOGS 只记挂点下标, t 从该点的累计路程时间取。"""
+    from baker.modes import MockMode
+
+    mode = MockMode("test_mock_dialog", config=load_config())
+    payload = mode.run()
+    total = payload.path[-1].t
+    assert len(payload.dialogs) == 5, "对白条数不变, 还是 5 条"
+    waypoint_times = [wp.t for wp in payload.path]
+    prev_t = -1.0
+    for dlg in payload.dialogs:
+        assert 0.0 <= dlg.t <= total, (
+            f"对白 {dlg.speaker}: {dlg.text!r} t={dlg.t:.2f}s 超出总时长 {total:.2f}s")
+        assert dlg.t > prev_t, "对白时间戳应单调递增"
+        assert dlg.t in waypoint_times, (
+            f"对白 t={dlg.t:.2f}s 应等于某个路径点的 t (从累计路程算)")
+        prev_t = dlg.t
+    # 最后一句挂在终点, 播到结束那一帧能触发 (Godot 到总时长时还会
+    # 发一次 time_changed, 气泡留在结束画面上)。
+    last = payload.dialogs[-1]
+    assert last.t == total
+    assert last.speaker == "老张" and last.text == "走, 中午请你吃饭"
+    # 内容和顺序不变
+    assert [d.text for d in payload.dialogs] == [
+        "出门, 天气不错", "早! 赶着去上班呢", "挤地铁中...",
+        "老张! 这边这边", "走, 中午请你吃饭"]
 
 
 def test_main_camera_clamped_and_no_smoothing():

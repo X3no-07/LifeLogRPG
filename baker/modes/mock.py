@@ -20,12 +20,20 @@ class MockMode(BaseMode):
         (65, 50), (70, 50), (75, 50),
     ]
     TRANSPORT_BREAKS = {5: "transit", 9: "transit", 13: "walking"}
+    # 对白挂在路径点上 (waypoint 下标, 说话人, 内容), 时间戳在 run() 里
+    # 从该点的累计路程时间取, 跟路径用同一套计时。
+    # 原先是写死的绝对秒数 (4/12/18/28/35), 跟路径时长没关系: 老分法
+    # 总时长才 28.5s、现在匀速 60 px/s 总时长 29.33s, 35s 那句永远
+    # 到不了, 播放结束也看不到。挂点按原时间戳在整条路线里的相对
+    # 位置 (原时间 / 35s) 就近取路径点, 顺序和内容都不变:
+    # 4s -> 点 3 (4.00s), 12s -> 点 8 (10.67s), 18s -> 点 10 (14.67s,
+    # 换乘段内, "挤地铁中"), 28s -> 点 15 (24.00s), 35s -> 终点 19 (29.33s)。
     DIALOGS = [
-        (4.0, "Me", "出门, 天气不错"),
-        (12.0, "路人", "早! 赶着去上班呢"),
-        (18.0, "Me", "挤地铁中..."),
-        (28.0, "同事", "老张! 这边这边"),
-        (35.0, "老张", "走, 中午请你吃饭"),
+        (3, "Me", "出门, 天气不错"),
+        (8, "路人", "早! 赶着去上班呢"),
+        (10, "Me", "挤地铁中..."),
+        (15, "同事", "老张! 这边这边"),
+        (19, "老张", "走, 中午请你吃饭"),
     ]
 
     def run(self) -> "LogPayload":
@@ -59,9 +67,14 @@ class MockMode(BaseMode):
         # 网格 (路上 1, 草地 0, 树 4, 建筑 2)
         p.map.grid = build_grid_from_waypoints(waypoints_grid, p.map.width, p.map.height)
 
-        # 对话
-        for (t, sp, text) in self.DIALOGS:
-            p.dialogs.append(Dialog(t=t, speaker=sp, text=text))
+        # 对话: 时间戳 = 挂点路径点的 t (累计路程 / 速度), 不是写死的秒数,
+        # 这样路径分法 / 速度一改, 对白自动跟着走, 不会再掉到总时长外。
+        # 最后一句挂在终点: Godot 播到总时长那一帧还会触发一次
+        # _update_dialog (playback 到总时长时发 time_changed), 气泡会
+        # 留在结束画面上, 不是一闪而过。
+        for (wp_idx, sp, text) in self.DIALOGS:
+            idx = max(0, min(wp_idx, len(p.path) - 1))
+            p.dialogs.append(Dialog(t=p.path[idx].t, speaker=sp, text=text))
 
         # 火红渲染上下文: write() 时自动画地图。Mock 没有真实 OSM/bbox,
         # 只按网格画 (渲染器 osm/bbox 为空时降级画网格, 不报错);
