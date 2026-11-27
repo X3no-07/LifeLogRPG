@@ -271,6 +271,7 @@ class _Tiles:
         self.paved = _flat(C["paved"])
         self.parking = _flat(C["parking"])
         self.dirt = _flat(C["dirt"])
+        self.road = _flat(C["road"])
         self.tree = _tree_tile()
         self.walk = self._sidewalk()
         self.poi = self._poi()
@@ -775,6 +776,9 @@ def render_firered_map(grid, building_heights=None, path=None, pois=None,
     tiles = _Tiles()
 
     # OSM -> 矢量 sidecar (没 bbox 时跳过矢量层, 只按网格画)
+    # grid_only: 完全没 OSM 时, 地面按网格自己的格值画 (草画草、路画路),
+    # 否则没 OSM landuse 的格子会全变铺装灰、路也看不见 (Mock 就是这么空的)。
+    grid_only = not (osm and bbox)
     if osm and bbox:
         roads, water, osm_buildings, ground_grid = _osm_to_sidecars(
             osm, bbox, (W, H))
@@ -912,9 +916,21 @@ def render_firered_map(grid, building_heights=None, path=None, pois=None,
             if v == BUILDING and blob_id[y][x] in traced_blobs:
                 v = GRASS  # 矢量形状稍后盖
             if v == GRASS:
-                t = ground_tile(x, y)
+                if grid_only:
+                    # 没 OSM 时按网格画: 草就是草 (不走 ground_tile,
+                    # 否则没 landuse 的格子全变铺装灰、整张图只剩米色)。
+                    grass_cells.add((x, y))
+                    t = tiles.grass
+                else:
+                    t = ground_tile(x, y)
             elif v == ROAD:
-                t = ground_tile(x, y)
+                if grid_only:
+                    # 没 OSM 时路按网格画成灰路条, 否则路格和草格一样
+                    # 都是铺装灰、红线就飘在空地上 (Mock 原样)。
+                    paved_cells.add((x, y))
+                    t = tiles.road
+                else:
+                    t = ground_tile(x, y)
             elif v == BUILDING:
                 edges = set()
                 if not is_building(x, y - 1):

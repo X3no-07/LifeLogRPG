@@ -53,4 +53,14 @@ class MockMode(BaseMode):
         for (t, sp, text) in self.DIALOGS:
             p.dialogs.append(Dialog(t=t, speaker=sp, text=text))
 
+        # 火红渲染上下文: write() 时自动画地图。Mock 没有真实 OSM/bbox,
+        # 只按网格画 (渲染器 osm/bbox 为空时降级画网格, 不报错);
+        # 没上下文就不出图, Godot 会回退到 TileMap 色块。
+        self._render_ctx = {
+            "bbox": None,
+            "osm": None,
+            "start_name": "",
+            "end_name": "",
+        }
+
         return p

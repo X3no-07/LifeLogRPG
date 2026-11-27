@@ -99,3 +99,23 @@ def test_world_loads_rendered_map_with_tilemap_fallback():
     # 换乘 pin 和室内 icon 图里没有, 两种模式都画 (不带 map_tex 守卫)
     assert "if loader.get_transit_markers().size() > 0:" in src
     assert "if loader.get_interiors().size() > 0:" in src
+
+
+def test_mock_mode_renders_map_next_to_json(tmp_path, monkeypatch):
+    """Mock 模式也要出图: 之前 run() 没填 _render_ctx, write() 不出图,
+    Godot 跑 Mock 只能回退 TileMap 色块。Mock 没真实 OSM/bbox,
+    只按网格画 (渲染器 osm/bbox 为空时降级, 不报错)。"""
+    import baker.modes.base as base_mod
+    from baker.modes import MockMode
+
+    mode = MockMode("test_mock_map", config=load_config())
+    monkeypatch.setattr(base_mod, "get_output_dir", lambda cfg: tmp_path)
+    mode.run()
+    out = mode.write()
+    assert out.exists()
+    assert out.name == "test_mock_map.json"
+    png = tmp_path / "test_mock_map_map.png"
+    assert png.exists(), "Mock 也应在 JSON 旁边出 _map.png, 否则 Godot 回退色块"
+    from PIL import Image
+    with Image.open(png) as im:
+        assert im.size == (320 * 16, 240 * 16)
