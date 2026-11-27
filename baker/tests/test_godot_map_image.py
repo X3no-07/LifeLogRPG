@@ -119,3 +119,49 @@ def test_mock_mode_renders_map_next_to_json(tmp_path, monkeypatch):
     from PIL import Image
     with Image.open(png) as im:
         assert im.size == (320 * 16, 240 * 16)
+
+
+def test_mock_mode_constant_speed():
+    """Mock 路径点时间戳按累计路程分 (匀速走): 之前每点固定 1.5s,
+    5 格段 53 px/s、10 格段 107 px/s, 人物忽快忽慢 (抖动)。
+    跟 text.py 同一个约定: 60 px/s 匀速, 每段速度相等。"""
+    import math
+
+    from baker.modes import MockMode
+
+    mode = MockMode("test_mock_speed", config=load_config())
+    payload = mode.run()
+    speeds = []
+    for a, b in zip(payload.path, payload.path[1:]):
+        dt = b.t - a.t
+        assert dt > 0, "时间戳必须单调递增"
+        dist = math.hypot(b.x - a.x, b.y - a.y) * 16
+        speeds.append(dist / dt)
+    assert speeds, "Mock 路径不能为空"
+    assert max(speeds) - min(speeds) < 0.01, (
+        f"每段速度应相等, 实测 min={min(speeds):.1f} max={max(speeds):.1f}")
+    assert abs(speeds[0] - 60.0) < 0.01, "应按 bake 默认步行速度 60 px/s 走"
+    # 总时长约 29.3s (110 格 x 16px / 60), 对白 (4/12/18/28s) 都在总时长内
+    assert abs(payload.path[-1].t - 110 * 16 / 60.0) < 0.01
+
+
+def test_main_camera_clamped_and_no_smoothing():
+    """Godot 相机: 直接跟随人物 + 夹到地图边界内, 不用位置平滑。
+    平滑会让相机滞后人物 (滞后 = 速度/平滑速度), 速度一变、拐弯、
+    换乘停顿时滞后量跟着变, 人物在画面里来回晃; 夹紧则是修地图
+    边缘露出深色底 (视口伸出地图外)。"""
+    src = _read_gd("main.gd")
+    # 没有位置平滑 (lag 来源)
+    assert "position_smoothing_enabled" not in src
+    assert "position_smoothing_speed" not in src
+    # 有夹紧函数, 跟随和初始化都走夹紧
+    assert "func _clamp_camera_position" in src
+    assert "camera.position = _clamp_camera_position(player.position)" in src
+    # 夹紧逻辑: 可见世界尺寸 = 视口 / zoom, 地图尺寸 = 网格 x tile_size,
+    # 地图比视口小时居中
+    assert "get_visible_rect().size / camera.zoom" in src
+    assert "get_grid_width() * tile_size" in src
+    assert "get_grid_height() * tile_size" in src
+    assert "map_px.x * 0.5" in src
+    assert "clamp(pos.x, half.x, map_px.x - half.x)" in src
+    assert "clamp(pos.y, half.y, map_px.y - half.y)" in src

@@ -37,14 +37,24 @@ class MockMode(BaseMode):
 
         # 路径 (mock 模式 1 grid = 1 px)
         waypoints_grid = [{"x": x, "y": y} for (x, y) in self.PATH_PIXELS]
-        cum_t = 0.0
+        # 时间戳按累计路程分 (匀速走): 每点固定 1.5s 会让 5 格段和 10 格段
+        # 速度差一倍 (53 vs 107 px/s), 人物忽快忽慢; 跟 text.py 同一个约定,
+        # 用 bake.default_walk_speed_px_per_sec (60 px/s) 匀速走。
+        walk_speed = float(self.config.get("bake", {}).get(
+            "default_walk_speed_px_per_sec", 60.0))
+        step_px = float(self.config.get("bake", {}).get("tile_size_px", 16))
+        cum_dist = 0.0
+        prev = None
         for i, wp in enumerate(waypoints_grid):
+            if prev is not None:
+                cum_dist += ((wp["x"] - prev["x"]) ** 2
+                             + (wp["y"] - prev["y"]) ** 2) ** 0.5 * step_px
             transport = self.TRANSPORT_BREAKS.get(i, "walking")
             p.path.append(Waypoint(
-                x=wp["x"], y=wp["y"], t=cum_t,
+                x=wp["x"], y=wp["y"], t=cum_dist / walk_speed,
                 label=f"step_{i}", transport=transport,
             ))
-            cum_t += 1.5
+            prev = wp
 
         # 网格 (路上 1, 草地 0, 树 4, 建筑 2)
         p.map.grid = build_grid_from_waypoints(waypoints_grid, p.map.width, p.map.height)

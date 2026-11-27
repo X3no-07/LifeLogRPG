@@ -159,15 +159,17 @@ func _build_modules() -> void:
         player.position = Vector2(int(p0.get("x", 0)) * tile_size + tile_size / 2.0,
                                   int(p0.get("y", 0)) * tile_size + tile_size / 2.0)
 
-    # 相机
+    # 相机: 直接跟随人物, 不用位置平滑
+    # 平滑会让相机滞后人物 (滞后量 = 速度 / 平滑速度), 速度一变、拐弯、
+    # 换乘停顿时滞后量跟着变, 人物就在画面里来回晃 (抖动); 直接跟随则
+    # 人物永远在画面中心、地图在下面匀速走, 不晃。拐弯处方向瞬间变,
+    # 一帧的事, 不是抖动。
     camera = Camera2D.new()
     camera.enabled = true
     camera.zoom = Vector2(2, 2)
-    camera.position_smoothing_enabled = true
-    camera.position_smoothing_speed = 5.0
     add_child(camera)
     if player:
-        camera.position = player.position
+        camera.position = _clamp_camera_position(player.position)
 
     # UI (创建 ui_layer 后才能给 TransportSystem 用)
     ui_sys = UISystemClass.new()
@@ -302,7 +304,32 @@ func _update_facing_direction(i: int, a: Dictionary, b: Dictionary) -> void:
 
 func _update_camera() -> void:
     if camera and player:
-        camera.position = player.position
+        camera.position = _clamp_camera_position(player.position)
+
+
+func _clamp_camera_position(pos: Vector2) -> Vector2:
+    # 把相机中心夹到地图边界内: 视口不能伸出地图外, 否则露出地图外的深色底。
+    # 地图原点在 (0,0), 尺寸 = 网格 x tile_size; 可见世界尺寸 = 视口 / zoom。
+    # 地图比视口小 (老 80x60 小 bake) 时居中, 不夹死。
+    if camera == null or loader == null:
+        return pos
+    var tile_size: int = loader.get_tile_size()
+    var map_px := Vector2(
+        loader.get_grid_width() * tile_size,
+        loader.get_grid_height() * tile_size)
+    var view_world: Vector2 = get_viewport().get_visible_rect().size / camera.zoom
+    var half: Vector2 = view_world * 0.5
+    var cx: float
+    var cy: float
+    if map_px.x <= view_world.x:
+        cx = map_px.x * 0.5
+    else:
+        cx = clamp(pos.x, half.x, map_px.x - half.x)
+    if map_px.y <= view_world.y:
+        cy = map_px.y * 0.5
+    else:
+        cy = clamp(pos.y, half.y, map_px.y - half.y)
+    return Vector2(cx, cy)
 
 
 func _update_npc() -> void:
