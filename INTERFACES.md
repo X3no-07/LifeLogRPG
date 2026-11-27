@@ -19,7 +19,7 @@ LifeLogRPG/
 ├── scripts\                      # Godot 端 (12 个模块)
 │   ├── main.gd                   # 主控制器 — 启动 + 主循环
 │   ├── loader.gd                 # JSON 加载 + 强校验 (LogLoader)
-│   ├── world.gd                  # Tilemap + 路径线 (WorldBuilder)
+│   ├── world.gd                  # 底图加载 + TileMap 回退 (WorldBuilder)
 │   ├── player.gd                 # 角色 sprite 工厂 (Player)
 │   ├── transport.gd              # 换乘动画 (TransportSystem)
 │   ├── npc.gd                    # NPC 系统 (NpcSystem)
@@ -54,15 +54,20 @@ LifeLogRPG/
 │   │   ├── gcj02.py              # GCJ-02 ↔ WGS84 互转
 │   │   ├── tiling.py             # 按路径切片 (slice_around_path)
 │   │   └── time_scale.py         # 时间缩放
-│   └── tests\                    # pytest, 278 个测试
+│   └── tests\                    # pytest
 │
-├── saved_logs\                   # 烘焙输出 (JSON 文件, Godot 读)
-│   └── log_*.json
+├── saved_logs\                   # 内置示例与本地烘焙输出
+│   ├── log_*.json                 # Godot 回放数据
+│   └── log_*_map.png              # 生成的像素底图
 │
 └── exports\                      # 视频导出目标 (P3)
 ```
 
 Godot 引擎二进制不入库 (`tools/godot/` 已 gitignore)，自己装 Godot 4.7.1。
+
+### 底图加载
+
+Baker 将 `<name>_map.png` 与 `<name>.json` 写到同一目录，底图尺寸为存档网格尺寸乘以每格像素数。PNG 已包含路线和地名。Godot 优先显示 PNG，在底图缺失或无法解码时回退到 TileMap。换乘标记和室内图标由播放器在两种模式下绘制。
 
 ## 1. Baker CLI 接口
 
@@ -432,12 +437,12 @@ python baker/check_api.py
 5. **P2 清理任务** (已做完):
    - `baker/bake_legacy.py` 已删
    - `baker/debug_amap.py` + `baker/debug_llm.py` 已删
-   - `baker/debug_real_*.py` + `baker/debug_way_project.py` + `baker/verify_final.py` 已删 (2026-11-26 清理, 功能被 pytest + check_api 覆盖)
+   - 已移除 `baker/debug_real_*.py`、`baker/debug_way_project.py` 和 `baker/verify_final.py`。使用 pytest 和 `baker/check_api.py` 进行验证。
 
 ## 8. 已知非核心问题 (P2 阶段处理)
 
 - `config.json` 字段无 JSON Schema 校验 (Pydantic 风格)
-- `loader.gd` 用宽松 `.get(key, default)`, schema 校验只 warn 不阻断; 宽/高缺失时 fallback 还是旧的 80×60 (baker 永远写 160×120, 平时碰不到)
+- `loader.gd` 用 `.get(key, default)` 读取存档，校验异常会告警。宽高缺失时按旧版的 80×60 处理。
 - Godot 端无 GUT (Godot Unit Test)
 - 视频导出模块未实现 (P3)
 - Skeleton2D 真 2D 木偶未实现 (P2.3 捏脸)
@@ -454,7 +459,7 @@ python baker/check_api.py
 
 ### 9.2 网格
 
-- 默认 160×120（`config.json` 的 `bake.viewport_grid_w/h`，`baker/core/schema.py` 的 MapData 默认值）。一格多大看切片（自适应切片，半径 800 米、总长约 1.5 公里封顶）；160×120 的格子是竖长方形，320×240 预览版才是一格约 7 米的正方形。
+- 当前 `config.json` 默认网格为 320×240，每格 16 px。每格对应的实际距离取决于地理切片大小，Godot 按存档记录的宽高读取。
 - 楼栅格化用 PIL 多边形填充（`osm_to_grid`），不是逐点 point-in-polygon：320×240 下旧办法要 1 小时，现在不到 1 秒。
 - 画的顺序：底（有 ground 数据时默认铺装、否则草地）→ 地面类型 → 绿地 → 水（闭合填面、开放画线宽 2，不再把整条河填成湖）→ 路（画在水上，过河是桥）→ 楼（楼后画，路不再切楼）。
 - `building:part` 也算楼（故宫那种大殿碎片），不然大殿会缺块。

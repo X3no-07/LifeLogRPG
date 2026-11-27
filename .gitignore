@@ -37,8 +37,20 @@ config.local.*.json
 # Godot 引擎二进制 (170MB, 自己装/用 tools/godot/ 软链)
 tools/godot/
 
-# 烘焙输出: 全部入库 (用户确认, clone 后能直接跑 demo)
-# saved_logs/
+# 本地烘焙输出和自定义存档。随仓库提供的示例单独列出。
+/saved_logs/*
+!/saved_logs/avatar.json
+!/saved_logs/log_001.json
+!/saved_logs/log_coords_route.json
+!/saved_logs/log_demo.json
+!/saved_logs/log_p13.json
+!/saved_logs/log_realmap_poi.json
+!/saved_logs/log_v2_text.json
+!/saved_logs/log_v3_driving.json
+!/saved_logs/log_weather_cloudy.json
+!/saved_logs/log_weather_rainy.json
+!/saved_logs/log_weather_snowy.json
+!/saved_logs/log_weather_sunny.json
 
 # 视频导出产物
 exports/*
