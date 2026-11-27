@@ -125,6 +125,15 @@ def test_render_empty_grid_raises():
         render_firered_map([])
 
 
+def test_render_route_keeps_the_bend_in_the_saved_waypoints():
+    # A clear road permits a diagonal shortcut, but playback takes this bend.
+    img = render_firered_map([[1] * 8 for _ in range(8)], path=[(2, 2), (4, 2), (4, 4)])
+    red = (220, 40, 40)
+    assert img.getpixel((56, 40)) == red
+    assert img.getpixel((72, 56)) == red
+    assert img.getpixel((56, 56)) != red
+
+
 def test_render_driving_points_do_not_draw_teleport_line():
     # driving 点是跳点: 红线只画 walking 段, 不能出现横跨地图的斜线。
     # 构造一条先 walking 后 driving 跳到对角的路径, 检查红线像素

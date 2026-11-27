@@ -20,8 +20,7 @@ render_jining.py (济宁) / render_hangzhou.py (杭州) 四份脚本的公共核
     比如西湖, 但栅格化后的网格里有水格: 大片水格按描边轮廓补画成水面,
     围住的陆地 (堤 / 岛) 再从快照里恢复, 不用为每个湖手调)
   - 树: 每格一棵圆树冠; 小楼阴影
-  - 路线红线: 只画步行 / 骑行段 (开车 / 公交的 teleport 点不断线),
-    先视线法平滑再画, 沿路走、无斜线、无楼梯状
+  - 路线红线: 按存档路径点连起步行 / 骑行段，保持与角色回放对齐。
   - 地标金顶: POI 名里含"故宫" / "午门"时, 其周边的楼群按金顶红墙画。
     这是按 POI 名字触发的通用地标规则 (名字来自烘焙的 POI 数据,
     不是写死坐标); 没有这类 POI 的地方完全不受影响。
@@ -56,7 +55,6 @@ from PIL import Image, ImageChops, ImageDraw, ImageFont
 from ..core.gridifier import (
     HIGHWAY_WIDTH,
     _project_floats,
-    smooth_path_on_grid,
 )
 from .vector_buildings import (
     completion_buildings,
@@ -1097,10 +1095,10 @@ def render_firered_map(grid, building_heights=None, path=None, pois=None,
                     od.rectangle([gx, gy, gx + T - 1, gy + 4], fill=(0, 0, 0, 100))
     img = Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB")
 
-    # ---- 路线红线: 只画步行 / 骑行段, 每段先视线法平滑再画 ----
+    # 角色沿存档的相邻路径点插值，底图使用相同的折线。
     if walk_pts:
         runs = []
-        cur = [(walk_pts[0][0], walk_pts[0][1])]
+        cur = []
         for (x, y, t) in path_pts:
             if t not in ("walking", "bicycling"):
                 if len(cur) >= 2:
@@ -1113,15 +1111,9 @@ def render_firered_map(grid, building_heights=None, path=None, pois=None,
             runs.append(cur)
         _odr = ImageDraw.Draw(img)
         for run in runs:
-            if len(run) < 2:
-                continue
-            smoothed = smooth_path_on_grid(
-                [{"x": x, "y": y} for x, y in run], grid)
-            _route_px = [((p["x"] + 0.5) * T, (p["y"] + 0.5) * T)
-                         for p in smoothed]
-            if len(_route_px) >= 2:
-                _odr.line(_route_px, fill=(255, 255, 255), width=7, joint="curve")
-                _odr.line(_route_px, fill=C["route"], width=4, joint="curve")
+            route_pixels = [((x + 0.5) * T, (y + 0.5) * T) for x, y in run]
+            _odr.line(route_pixels, fill=(255, 255, 255), width=7, joint="curve")
+            _odr.line(route_pixels, fill=C["route"], width=4, joint="curve")
         # 起 / 终点标记
         _od2 = ImageDraw.Draw(img)
         for ((mx, my), col) in ((walk_pts[0], C["route_start"]),
