@@ -29,10 +29,12 @@ var _pois: Array = []
 var _transit_markers: Array = []   # P0.4
 var _building_heights: Array = []   # P1.2 (跟 grid 同步, 0=无建筑)
 var _interiors: Array = []          # P1.3 (室内 slot: 咖啡厅/办公室/etc.)
+var _log_path: String = ""          # P1.4 本次加载的 JSON 路径 (派生渲染图路径)
 
 
 func load(path: String) -> Dictionary:
     """主入口, 加载并校验, 返回整个 payload dict (供其他模块直接读)"""
+    _log_path = path
     _raw = {}
     _waypoints = []
     _dialogs = []
@@ -203,3 +205,15 @@ func get_total_duration() -> float:
 
 func get_log_title() -> String:
     return String(_meta.get("title", ""))
+
+func get_log_path() -> String:
+    """本次加载的 JSON 路径 (P1.4 新增)"""
+    return _log_path
+
+func get_map_image_path() -> String:
+    """baker 渲染图路径 (P1.4 新增): JSON 同目录同名, 后缀 _map.png
+    例: res://saved_logs/test_palace.json -> res://saved_logs/test_palace_map.png
+    没加载过 / 不是 .json 结尾返回 "" (调用方回退到 TileMap)"""
+    if _log_path == "" or not _log_path.ends_with(".json"):
+        return ""
+    return _log_path.substr(0, _log_path.length() - 5) + "_map.png"

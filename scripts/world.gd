@@ -7,19 +7,33 @@ class_name WorldBuilder
 #   - 8 个 cell type -> 8 个 tile (grass/road/building/water/tree/sidewalk/poi/plaza)
 #   - TileSet 运行时创建 (避免依赖 .import 文件)
 #
+# P1.4 底图升级: 优先用 baker 渲染图 (saved_logs/<name>_map.png, 火红风)
+#   当底图 (Sprite2D), 路线/POI 名已画进图里就不再重复画;
+#   没有图 (老 bake) 才回退到 TileMap 色块 + 棕色抬高块。
+#
 # 用法:
 #   var world = WorldBuilder.new()
 #   add_child(world)
 #   world.build(loader)   # 传入 LogLoader
 #
-# 输出节点树:
+# 输出节点树 (有渲染图时):
+#   WorldBuilder (Node2D)
+#   ├── Background (ColorRect, z=-100)
+#   ├── RenderedMap (Sprite2D, z=0, 取代 TileMap)
+#   ├── PathOverlay (Node2D, 空, 路线已在图里)
+#   ├── NPCs (Node2D, 由 NpcSystem 填充)
+#   ├── TransitPins (Node2D, P0.4 端点 pin)
+#   └── InteriorMap (TileMap, P1.3 室内 icon)
+# 输出节点树 (无渲染图时, 跟原来一样):
 #   WorldBuilder (Node2D)
 #   ├── Background (ColorRect, z=-100)
 #   ├── TileMap (含 TileMapLayer 0, z=0)
 #   ├── PathOverlay (Node2D, 含 Line2D + waypoint dots)
 #   ├── NPCs (Node2D, 由 NpcSystem 填充)
 #   ├── POIs (Node2D, P0.3 POI 标记)
-#   └── TransitPins (Node2D, P0.4 端点 pin)
+#   ├── TransitPins (Node2D, P0.4 端点 pin)
+#   ├── BuildingHeights (Node2D, P1.2 抬高块)
+#   └── InteriorMap (TileMap, P1.3 室内 icon)
 
 # Tile sheet 路径 (res:// 是 Godot 项目根目录, 跟 project.godot 同级)
 const TILE_SHEET_PATH := "res://assets/tiles/tile_sheet.png"
@@ -159,12 +173,44 @@ func _init_interior_set() -> void:
 
 
 # =====================================================================
+#  P1.4: 渲染图底图加载
+# =====================================================================
+
+func _load_rendered_map(loader) -> Texture2D:
+    """加载 baker 渲染图 (JSON 同目录 <name>_map.png)。
+    找不到/解码失败返回 null, 调用方回退到 TileMap。
+    用 FileAccess + load_png_from_buffer, 跟 _init_tile_set 同一套路,
+    不走 .import 系统 (bake 出图是运行时文件, 编辑器没 import 过)。"""
+    if loader == null or not loader.has_method("get_map_image_path"):
+        return null
+    var img_path: String = loader.get_map_image_path()
+    if img_path == "":
+        return null
+    if not FileAccess.file_exists(img_path):
+        print("[WorldBuilder] 无渲染图, 用 TileMap: " + img_path)
+        return null
+    var f := FileAccess.open(img_path, FileAccess.READ)
+    if f == null:
+        push_warning("WorldBuilder: cannot open " + img_path)
+        return null
+    var bytes := f.get_buffer(f.get_length())
+    f.close()
+    var img := Image.new()
+    var err := img.load_png_from_buffer(bytes)
+    if err != OK:
+        push_warning("WorldBuilder: cannot decode map PNG %s, err=%d" % [img_path, err])
+        return null
+    var tex := ImageTexture.create_from_image(img)
+    print("[WorldBuilder] 渲染图已加载: %s (%dx%d)" % [img_path, img.get_width(), img.get_height()])
+    return tex
+
+
+# =====================================================================
 #  Build
 # =====================================================================
 
 func build(loader) -> void:
-    _init_tile_set()
-    _init_interior_set()  # P1.3
+    _init_interior_set()  # P1.3 (两种底图模式都要)
     tile_size = loader.get_tile_size()
     grid_w = loader.get_grid_width()
     grid_h = loader.get_grid_height()
@@ -177,58 +223,81 @@ func build(loader) -> void:
     bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
     add_child(bg)
 
-    # TileMap + TileMapLayer (P1.1: 用 TileSet 替换 ColorRect)
-    tilemap = TileMap.new()
-    tilemap.name = "TileMap"
-    tilemap.tile_set = tile_set
-    tilemap.z_index = 0
-    add_child(tilemap)
+    # P1.4 底图: 优先用 baker 渲染图, 没有图 (老 bake) 才回退到 TileMap 色块
+    var map_tex: Texture2D = _load_rendered_map(loader)
+    if map_tex != null:
+        var sprite := Sprite2D.new()
+        sprite.name = "RenderedMap"
+        sprite.texture = map_tex
+        sprite.centered = false
+        sprite.position = Vector2.ZERO
+        sprite.z_index = 0
+        var tex_size := map_tex.get_size()
+        if tex_size.x > 0 and tex_size.y > 0:
+            # 渲染图是 16px/格, 跟 tile_size 一致时 scale=1;
+            # 尺寸对不上也按世界大小缩放对齐, 保证路线坐标重合
+            sprite.scale = Vector2(
+                float(grid_w * tile_size) / tex_size.x,
+                float(grid_h * tile_size) / tex_size.y)
+        add_child(sprite)
+        print("[WorldBuilder] 渲染图底图: %dx%d -> %dx%d" % [
+            tex_size.x, tex_size.y, grid_w * tile_size, grid_h * tile_size])
+    else:
+        _init_tile_set()
+        # TileMap + TileMapLayer (P1.1: 用 TileSet 替换 ColorRect)
+        tilemap = TileMap.new()
+        tilemap.name = "TileMap"
+        tilemap.tile_set = tile_set
+        tilemap.z_index = 0
+        add_child(tilemap)
 
-    tile_layer = TileMapLayer.new()
-    tile_layer.name = "Layer0"
-    tile_layer.z_index = 0
-    tilemap.add_child(tile_layer)
+        tile_layer = TileMapLayer.new()
+        tile_layer.name = "Layer0"
+        tile_layer.z_index = 0
+        tilemap.add_child(tile_layer)
 
-    # 设 cells
-    var grid: Array = loader.get_grid()
-    var set_count: int = 0
-    for y in range(grid_h):
-        if y >= grid.size():
-            break
-        var row: Array = grid[y]
-        for x in range(grid_w):
-            if x >= row.size():
+        # 设 cells
+        var grid: Array = loader.get_grid()
+        var set_count: int = 0
+        for y in range(grid_h):
+            if y >= grid.size():
                 break
-            var cell_type: int = int(row[x])
-            var atlas_coords: Vector2i = _cell_to_atlas(cell_type)
-            tile_layer.set_cell(Vector2i(x, y), 0, atlas_coords)
-            set_count += 1
-    print("[WorldBuilder] TileMap set %d cells (%dx%d)" % [set_count, grid_w, grid_h])
+            var row: Array = grid[y]
+            for x in range(grid_w):
+                if x >= row.size():
+                    break
+                var cell_type: int = int(row[x])
+                var atlas_coords: Vector2i = _cell_to_atlas(cell_type)
+                tile_layer.set_cell(Vector2i(x, y), 0, atlas_coords)
+                set_count += 1
+        print("[WorldBuilder] TileMap set %d cells (%dx%d)" % [set_count, grid_w, grid_h])
 
-    # 路径线
+    # 路径线 (P1.4: 有渲染图时路线已画进图里, 不再重复画;
+    # 没图才画 Line2D, 否则红线会跟图里的红线重成双线)
     path_overlay = Node2D.new()
     path_overlay.name = "PathOverlay"
     add_child(path_overlay)
-    _draw_path(loader.get_waypoints())
+    if map_tex == null:
+        _draw_path(loader.get_waypoints())
 
     # NPC 层
     npc_layer = Node2D.new()
     npc_layer.name = "NPCs"
     add_child(npc_layer)
 
-    # P0.3: POI 标记
-    if loader.get_pois().size() > 0:
+    # P0.3: POI 标记 (P1.4: 有渲染图时图里已标了 POI 名, 不再重复画)
+    if loader.get_pois().size() > 0 and map_tex == null:
         render_pois(loader.get_pois())
 
-    # P0.4: Transit 端点 pin
+    # P0.4: Transit 端点 pin (图里没有, 两种模式都画)
     if loader.get_transit_markers().size() > 0:
         render_transit_markers(loader.get_transit_markers())
 
-    # P1.2: 建筑高度 (抬高建筑到对应层数高度)
-    if loader.get_building_heights().size() > 0:
+    # P1.2: 建筑高度 (P1.4: 有渲染图时图里已有矢量楼, 不再画棕色抬高块)
+    if loader.get_building_heights().size() > 0 and map_tex == null:
         render_buildings_with_height(loader.get_building_heights())
 
-    # P1.3: 室内 slots (咖啡厅/办公室/医院/... 画 icon)
+    # P1.3: 室内 slots (图里没有 icon, 两种模式都画)
     if loader.get_interiors().size() > 0:
         render_interior_slots(loader.get_interiors())
 
