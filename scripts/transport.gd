@@ -20,6 +20,7 @@ var overlay: ColorRect
 var label: Label
 var _current: String = "walking"
 var _in_transition: bool = false
+var _transition: Tween
 
 
 func setup(p_ui_layer, p_player) -> void:
@@ -59,6 +60,7 @@ func request_switch(from: String, to: String) -> void:
         return
     _in_transition = true
     var tween := create_tween()
+    _transition = tween
     tween.set_parallel(false)
     # 淡出
     tween.tween_property(overlay, "color:a", 0.85, 0.3)
@@ -80,7 +82,12 @@ func request_switch(from: String, to: String) -> void:
 
 
 func sync_current(transport: String) -> void:
-    """外部直接同步当前 transport (无动画), 用于初始化"""
+    """初始化或跳转时直接同步交通方式。"""
+    if _in_transition:
+        _transition.kill()
+        overlay.color.a = 0.0
+        label.text = ""
+        _in_transition = false
     if player:
         player.switch_to(transport)
     _current = transport

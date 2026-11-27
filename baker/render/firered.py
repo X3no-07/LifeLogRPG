@@ -45,6 +45,7 @@ render_jining.py (济宁) / render_hangzhou.py (杭州) 四份脚本的公共核
 渲染失败由调用方兜底 (baker 写 JSON 是主流程, 画图挂了也不能丢 JSON)。
 """
 import math
+import os
 import random
 from collections import deque
 from pathlib import Path
@@ -1130,28 +1131,39 @@ def render_firered_map(grid, building_heights=None, path=None, pois=None,
                          fill=col, outline=(255, 255, 255))
 
     # ---- 通用标注: 起终点名 + POI 名 (短名、去重、拉开间距, 不写死地名) ----
-    try:
-        f_lab = ImageFont.truetype(FONT_PATH, 22)
-    except Exception:
+    windows_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+    for font_path in (FONT_PATH, windows_fonts / "msyh.ttc", windows_fonts / "simhei.ttf"):
+        try:
+            f_lab = ImageFont.truetype(str(font_path), 22)
+            break
+        except OSError:
+            continue
+    else:
         f_lab = ImageFont.load_default()
 
+    label_draw = ImageDraw.Draw(img, "RGBA")
+
     def map_label(text, gx, gy):
-        ld = ImageDraw.Draw(img)
         px, py = (gx + 0.5) * T, (gy + 0.5) * T
-        bb = ld.textbbox((0, 0), text, font=f_lab)
-        w, h = bb[2] - bb[0], bb[3] - bb[1]
-        x, y = px - w // 2, py - h // 2
-        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1),
-                       (-1, -1), (1, 1), (-1, 1), (1, -1)):
-            ld.text((x + dx, y + dy), text, font=f_lab, fill=(255, 255, 255))
-        ld.text((x, y), text, font=f_lab, fill=(40, 32, 24))
+        left, top, right, bottom = label_draw.textbbox((0, 0), text, font=f_lab)
+        width, height = right - left, bottom - top
+        pad_x, pad_y = 6, 3
+        margin_x, margin_y = pad_x + 2, pad_y + 2
+        if width > img.width - 2 * margin_x or height > img.height - 2 * margin_y:
+            return
+        x = max(margin_x, min(px - width / 2, img.width - width - margin_x))
+        y = max(margin_y, min(py - height / 2, img.height - height - margin_y))
+        label_draw.rounded_rectangle((x - pad_x, y - pad_y,
+                                      x + width + pad_x, y + height + pad_y),
+                                     radius=3, fill=(35, 34, 31, 210))
+        label_draw.text((x - left, y - top), text, font=f_lab, fill=(255, 248, 230))
 
     labelled = []
     if walk_pts and start_name:
-        map_label(start_name, walk_pts[0][0] + 2, walk_pts[0][1] + 2)
+        map_label(start_name, walk_pts[0][0], walk_pts[0][1] + 2)
         labelled.append(walk_pts[0])
     if walk_pts and end_name and end_name != start_name:
-        map_label(end_name, walk_pts[-1][0] + 2, walk_pts[-1][1] + 2)
+        map_label(end_name, walk_pts[-1][0], walk_pts[-1][1] + 2)
         labelled.append(walk_pts[-1])
     n_labels = 0
     for name, gx, gy, cat in poi_list:

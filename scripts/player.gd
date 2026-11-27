@@ -1,128 +1,84 @@
 extends Node2D
 class_name Player
-# Player - 角色容器, 包含 4 种 transport sprite, 通过 switch_transport() 切换
-#
-# 公开 API:
-#   build(tile_size) -> void            # 初始化所有 sprite
-#   apply_avatar(avatar: Dictionary) -> void   # 用 avatar 配置重画 walking sprite
-#   switch_to(transport: String)        # 切换可见 sprite, 无 tween (transport.gd 处理淡入淡出)
-#   get_current() -> String             # 返回当前 transport 名
-#   get_eye_node() -> Node              # 朝向指示点 (给 _update_facing_direction 用)
 
 const PALETTE := {"player": Color8(242, 204, 44), "skin": Color8(242, 191, 140)}
-
-# avatar 配方 (跟 avatar_builder.gd 的 OPTIONS 同步)
-# shape parts: [x, y, w, h]  (相对中心, 1px 单位)
-const AVATAR_PARTS := {
-    "hair": [
-        {"id": "spike", "name": "尖发", "color": Color8(50, 30, 20),
-         "parts": [{"x": -5, "y": -10, "w": 10, "h": 3},
-                   {"x": -3, "y": -13, "w": 2, "h": 3},
-                   {"x": 1, "y": -13, "w": 2, "h": 3}]},
-        {"id": "bob", "name": "波波头", "color": Color8(120, 70, 30),
-         "parts": [{"x": -5, "y": -10, "w": 10, "h": 4},
-                   {"x": -7, "y": -6, "w": 2, "h": 4},
-                   {"x": 5, "y": -6, "w": 2, "h": 4}]},
-        {"id": "bald", "name": "光头", "color": Color8(200, 150, 100),
-         "parts": [{"x": -5, "y": -10, "w": 10, "h": 2}]},
-    ],
-    "skin": [
-        {"id": "light", "name": "白皮肤", "color": Color8(245, 215, 175), "parts": []},
-        {"id": "medium", "name": "黄皮肤", "color": Color8(230, 190, 140), "parts": []},
-        {"id": "dark", "name": "深皮肤", "color": Color8(160, 110, 70), "parts": []},
-    ],
-    "shirt": [
-        {"id": "red", "name": "红 T 恤", "color": Color8(220, 60, 60), "parts": [{"x": -5, "y": -2, "w": 10, "h": 5}]},
-        {"id": "blue", "name": "蓝 T 恤", "color": Color8(60, 110, 200), "parts": [{"x": -5, "y": -2, "w": 10, "h": 5}]},
-        {"id": "white", "name": "白衬衫", "color": Color8(245, 245, 245), "parts": [{"x": -5, "y": -2, "w": 10, "h": 5}]},
-    ],
-    "pants": [
-        {"id": "blue", "name": "蓝裤", "color": Color8(50, 80, 150), "parts": [{"x": -5, "y": 3, "w": 10, "h": 5}]},
-        {"id": "black", "name": "黑裤", "color": Color8(40, 40, 50), "parts": [{"x": -5, "y": 3, "w": 10, "h": 5}]},
-    ],
-    "accessory": [
-        {"id": "none", "name": "无", "color": Color.WHITE, "parts": []},
-        {"id": "glasses", "name": "眼镜", "color": Color8(30, 30, 30),
-         "parts": [{"x": -4, "y": -6, "w": 3, "h": 2},
-                   {"x": 1, "y": -6, "w": 3, "h": 2},
-                   {"x": -1, "y": -5, "w": 2, "h": 1}]},
-    ],
+const WALK_ATLAS := "res://assets/characters/urban_walk.png"
+const FRAME_SIZE := Vector2i(16, 16)
+const WALK_SCALE := 1.5
+const DIRECTIONS := ["down", "up", "left", "right"]
+const HAIR_VARIANTS := {"spike": 0, "bob": 1, "bald": 2}
+const SOURCE_SHIRTS := [[0x42a379, 0x369069], [0xc2504d, 0xa54240], [0xaaa8bd, 0x898ca6]]
+const SOURCE_PANTS := [[0xd6d4aa, 0xc5b993], [0xa09cca, 0x7a77a4], [0x60605a, 0x54544e]]
+const SOURCE_SKIN := [0xffc999, 0xffc8a1, 0xf1b089, 0xe29779]
+const SHIRT_COLORS := {
+    "red": [Color("#dc5055"), Color("#ad3847")],
+    "blue": [Color("#507bc7"), Color("#345799")],
+    "white": [Color("#eeeae4"), Color("#c7c0b6")],
+}
+const PANTS_COLORS := {
+    "blue": [Color("#4d617d"), Color("#34455e")],
+    "black": [Color("#4a4650"), Color("#302e35")],
+}
+const SKIN_COLORS := {
+    "light": [Color("#ffe0bd"), Color("#fbd8b1"), Color("#efbe98"), Color("#d69475")],
+    "medium": [Color("#f5bd8e"), Color("#efb285"), Color("#d99772"), Color("#b67758")],
+    "dark": [Color("#b97654"), Color("#ad6b4d"), Color("#92573f"), Color("#74412e")],
 }
 
-var _sprites: Dictionary = {}  # {"walking": Node2D, "driving": ..., "transit": ..., "bicycling": ...}
-var _current: String = "walking"
+static var _source_atlas: Image
+
 var tile_size: int = 16
-var _avatar: Dictionary = {}  # 当前 avatar 配置
+var _sprites: Dictionary = {}
+var _current: String = "walking"
+var _walk_sprite: AnimatedSprite2D
+var _direction: String = "down"
+var _moving: bool = false
 
 
 func build(p_tile_size: int) -> void:
     tile_size = p_tile_size
-    _sprites["walking"] = _create_walk()
-    _sprites["driving"] = _create_drive()
-    _sprites["transit"] = _create_transit()
-    _sprites["bicycling"] = _create_bike()
-    for k in _sprites:
-        var sp: Node2D = _sprites[k]
-        sp.visible = false
-        add_child(sp)
-    _sprites["walking"].visible = true
-    _current = "walking"
+    _walk_sprite = AnimatedSprite2D.new()
+    _walk_sprite.name = "WalkSprite"
+    _walk_sprite.centered = false
+    _walk_sprite.offset = Vector2(-FRAME_SIZE.x / 2.0, -FRAME_SIZE.y)
+    _walk_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+    _walk_sprite.scale = Vector2.ONE * (WALK_SCALE * tile_size / FRAME_SIZE.x)
+    _sprites = {
+        "walking": _walk_sprite,
+        "driving": _create_drive(),
+        "transit": _create_transit(),
+        "bicycling": _create_bike(),
+    }
+    for transport in _sprites:
+        var sprite: Node2D = _sprites[transport]
+        sprite.visible = transport == _current
+        add_child(sprite)
+    apply_avatar({})
 
 
 func apply_avatar(avatar: Dictionary) -> void:
-    """用 avatar 配置重画 walking sprite (其它 sprite 暂不重画, P2 阶段)
-    avatar: {hair, skin, shirt, pants, accessory}
-    """
-    _avatar = avatar
-    if not _sprites.has("walking"):
-        return
-    var walk: Node2D = _sprites["walking"]
-    # 清理现有 (保留 Eye 因为朝向用)
-    for child in walk.get_children():
-        if child.name == "Eye":
-            continue
-        child.queue_free()
-    # 顺序: pants -> skin -> shirt -> hair -> accessory
-    _avatar_draw_layer(walk, "pants")
-    _avatar_draw_layer(walk, "skin")
-    _avatar_draw_layer(walk, "shirt")
-    _avatar_draw_layer(walk, "hair")
-    _avatar_draw_layer(walk, "accessory")
+    if _walk_sprite:
+        _walk_sprite.sprite_frames = build_avatar_frames(avatar)
+        _update_walk_animation()
 
 
-func _avatar_draw_layer(walk: Node2D, layer_id: String) -> void:
-    var opt_id: String = _avatar.get(layer_id, "")
-    if opt_id == "":
-        return
-    var opt: Dictionary = _get_avatar_option(layer_id, opt_id)
-    if opt.is_empty():
-        return
-    for part in opt["parts"]:
-        var rect := ColorRect.new()
-        rect.color = opt["color"]
-        rect.size = Vector2(part["w"], part["h"])
-        rect.position = Vector2(part["x"] - 8, part["y"] - 8)
-        rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
-        walk.add_child(rect)
-
-
-func _get_avatar_option(layer_id: String, opt_id: String) -> Dictionary:
-    for opt in AVATAR_PARTS.get(layer_id, []):
-        if opt["id"] == opt_id:
-            return opt
-    return {}
+func set_walk_state(heading: Vector2, moving: bool) -> void:
+    if heading.length_squared() > 0.0001:
+        if absf(heading.x) > absf(heading.y):
+            _direction = "right" if heading.x > 0 else "left"
+        else:
+            _direction = "down" if heading.y > 0 else "up"
+    _moving = moving
+    _update_walk_animation()
 
 
 func switch_to(transport: String) -> bool:
-    """切换 transport, 返回是否真的换了 (false = 已经是这个)"""
-    if transport == _current:
+    if transport == _current or not _sprites.has(transport):
         return false
-    if not _sprites.has(transport):
-        return false
-    if _sprites.has(_current):
-        _sprites[_current].visible = false
+    _sprites[_current].visible = false
     _sprites[transport].visible = true
     _current = transport
+    _update_walk_animation()
     return true
 
 
@@ -130,38 +86,93 @@ func get_current() -> String:
     return _current
 
 
-func get_eye_node() -> Node:
-    var sp: Node2D = _sprites.get("walking")
-    if sp:
-        return sp.get_node_or_null("Eye")
+func _update_walk_animation() -> void:
+    if not _walk_sprite or not _walk_sprite.sprite_frames:
+        return
+    var is_walking: bool = _moving and _current == "walking"
+    var animation := ("walk_" if is_walking else "idle_") + _direction
+    var needs_restart := is_walking and not _walk_sprite.is_playing()
+    if _walk_sprite.sprite_frames.has_animation(animation) and (_walk_sprite.animation != animation or needs_restart):
+        _walk_sprite.play(animation)
+
+
+static func build_avatar_frames(avatar: Dictionary) -> SpriteFrames:
+    var frames := SpriteFrames.new()
+    frames.remove_animation("default")
+    if _source_atlas == null:
+        _source_atlas = _load_walk_atlas()
+    if _source_atlas == null:
+        return frames
+
+    var variant: int = HAIR_VARIANTS.get(avatar.get("hair", "spike"), 0)
+    var origin := Vector2i(0, variant * FRAME_SIZE.y * DIRECTIONS.size())
+    var size := Vector2i(FRAME_SIZE.x * 3, FRAME_SIZE.y * DIRECTIONS.size())
+    var image := _source_atlas.get_region(Rect2i(origin, size))
+    _recolor_avatar(image, variant, avatar)
+    if avatar.get("accessory") == "glasses":
+        _draw_glasses(image)
+
+    var atlas := ImageTexture.create_from_image(image)
+    for direction_index in range(DIRECTIONS.size()):
+        var direction: String = DIRECTIONS[direction_index]
+        var idle := "idle_" + direction
+        var walk := "walk_" + direction
+        frames.add_animation(idle)
+        frames.set_animation_loop(idle, false)
+        frames.add_animation(walk)
+        frames.set_animation_speed(walk, 8.0)
+        var textures: Array[AtlasTexture] = []
+        for frame_index in range(3):
+            var frame := AtlasTexture.new()
+            frame.atlas = atlas
+            frame.region = Rect2(Vector2(FRAME_SIZE * Vector2i(frame_index, direction_index)), Vector2(FRAME_SIZE))
+            frame.filter_clip = true
+            textures.append(frame)
+        frames.add_frame(idle, textures[0])
+        for index in [0, 1, 0, 2]:
+            frames.add_frame(walk, textures[index])
+    return frames
+
+
+static func _load_walk_atlas() -> Image:
+    # Raw PNG supports headless runs before editor import.
+    if ResourceLoader.exists(WALK_ATLAS, "Texture2D"):
+        var texture := load(WALK_ATLAS) as Texture2D
+        if texture:
+            return texture.get_image()
+    var image := Image.new()
+    if image.load_png_from_buffer(FileAccess.get_file_as_bytes(WALK_ATLAS)) == OK:
+        return image
+    push_error("Player: failed to load " + WALK_ATLAS)
     return null
 
 
-# ---------- sprite 工厂 ----------
+static func _recolor_avatar(image: Image, variant: int, avatar: Dictionary) -> void:
+    var skin: Array = SKIN_COLORS.get(avatar.get("skin"), SKIN_COLORS["medium"])
+    var shirt: Array = SHIRT_COLORS.get(avatar.get("shirt"), SHIRT_COLORS["red"])
+    var pants: Array = PANTS_COLORS.get(avatar.get("pants"), PANTS_COLORS["blue"])
+    var replacements: Dictionary = {}
+    for index in range(SOURCE_SKIN.size()):
+        replacements[SOURCE_SKIN[index]] = skin[index]
+    for index in range(2):
+        replacements[SOURCE_SHIRTS[variant][index]] = shirt[index]
+        replacements[SOURCE_PANTS[variant][index]] = pants[index]
+    for y in range(image.get_height()):
+        for x in range(image.get_width()):
+            var color := image.get_pixel(x, y)
+            var key := color.to_rgba32() >> 8
+            if color.a > 0.0 and replacements.has(key):
+                image.set_pixel(x, y, replacements[key])
 
-func _create_walk() -> Node2D:
-    var root := Node2D.new()
-    root.name = "WalkSprite"
-    var s := float(tile_size)
-    var body := ColorRect.new()
-    body.color = PALETTE["player"]
-    body.size = Vector2(s * 0.6, s * 0.7)
-    body.position = Vector2(-s * 0.3, -s * 0.35)
-    body.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    root.add_child(body)
-    var head := ColorRect.new()
-    head.color = PALETTE["skin"]
-    head.size = Vector2(s * 0.5, s * 0.4)
-    head.position = Vector2(-s * 0.25, -s * 0.75)
-    head.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    root.add_child(head)
-    var eye := ColorRect.new()
-    eye.name = "Eye"
-    eye.color = Color.BLACK
-    eye.size = Vector2(2, 2)
-    eye.position = Vector2(s * 0.05, -s * 0.6)
-    root.add_child(eye)
-    return root
+
+static func _draw_glasses(image: Image) -> void:
+    var frame_color := Color("#343044")
+    for frame_index in range(3):
+        var x := frame_index * FRAME_SIZE.x
+        var eye_y := 7 if frame_index == 0 else 6
+        image.fill_rect(Rect2i(x + 5, eye_y, 6, 1), frame_color)
+        image.fill_rect(Rect2i(x + 4, 2 * FRAME_SIZE.y + eye_y, 3, 1), frame_color)
+        image.fill_rect(Rect2i(x + 9, 3 * FRAME_SIZE.y + eye_y, 3, 1), frame_color)
 
 
 func _create_drive() -> Node2D:

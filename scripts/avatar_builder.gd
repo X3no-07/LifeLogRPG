@@ -2,9 +2,7 @@ extends Node
 class_name AvatarBuilder
 # AvatarBuilder - 像素捏脸/形象自定义
 #
-# 5 个图层, 共 72 种组合:
-#   hair (3)  × skin (3)  × shirt (3) × pants (2) × accessory (2) = 108
-#   实际用: 3*3*3*2*2 = 108
+# 发型 (3) × 肤色 (3) × 上衣 (3) × 裤子 (2) × 配饰 (2) = 108
 #
 # 用法:
 #   var ab = AvatarBuilder.new()
@@ -18,56 +16,32 @@ class_name AvatarBuilder
 signal confirmed(avatar: Dictionary)
 
 const AVATAR_PATH := "res://saved_logs/avatar.json"
-const PREVIEW_SCALE := 4  # 预览放大倍数 (16px * 4 = 64px)
+const PREVIEW_SCALE := 6
+const PlayerClass = preload("res://scripts/player.gd")
 
-# 颜色配方 (每图层是一个 Color + 形状描述)
-# shape = [[x, y, w, h], ...]  (相对 -8..8 中心, 单位 1px)
 const OPTIONS := {
     "hair": [
-        {"id": "spike", "name": "尖发", "color": Color8(50, 30, 20),
-         "parts": [
-            {"x": -5, "y": -10, "w": 10, "h": 3},  # 顶部
-            {"x": -3, "y": -13, "w": 2, "h": 3},  # 左侧尖
-            {"x": 1, "y": -13, "w": 2, "h": 3},   # 右侧尖
-         ]},
-        {"id": "bob", "name": "波波头", "color": Color8(120, 70, 30),
-         "parts": [
-            {"x": -5, "y": -10, "w": 10, "h": 4},
-            {"x": -7, "y": -6, "w": 2, "h": 4},    # 左侧垂发
-            {"x": 5, "y": -6, "w": 2, "h": 4},     # 右侧垂发
-         ]},
-        {"id": "bald", "name": "光头", "color": Color8(200, 150, 100),
-         "parts": [
-            {"x": -5, "y": -10, "w": 10, "h": 2},   # 光头高光
-         ]},
+        {"id": "spike", "name": "短发"},
+        {"id": "bob", "name": "长发"},
+        {"id": "bald", "name": "光头"},
     ],
     "skin": [
-        {"id": "light", "name": "白皮肤", "color": Color8(245, 215, 175), "parts": []},
-        {"id": "medium", "name": "黄皮肤", "color": Color8(230, 190, 140), "parts": []},
-        {"id": "dark", "name": "深皮肤", "color": Color8(160, 110, 70), "parts": []},
+        {"id": "light", "name": "浅肤色"},
+        {"id": "medium", "name": "暖肤色"},
+        {"id": "dark", "name": "深肤色"},
     ],
     "shirt": [
-        {"id": "red", "name": "红 T 恤", "color": Color8(220, 60, 60),
-         "parts": [{"x": -5, "y": -2, "w": 10, "h": 5}]},
-        {"id": "blue", "name": "蓝 T 恤", "color": Color8(60, 110, 200),
-         "parts": [{"x": -5, "y": -2, "w": 10, "h": 5}]},
-        {"id": "white", "name": "白衬衫", "color": Color8(245, 245, 245),
-         "parts": [{"x": -5, "y": -2, "w": 10, "h": 5}]},
+        {"id": "red", "name": "红 T 恤"},
+        {"id": "blue", "name": "蓝 T 恤"},
+        {"id": "white", "name": "白衬衫"},
     ],
     "pants": [
-        {"id": "blue", "name": "蓝裤", "color": Color8(50, 80, 150),
-         "parts": [{"x": -5, "y": 3, "w": 10, "h": 5}]},
-        {"id": "black", "name": "黑裤", "color": Color8(40, 40, 50),
-         "parts": [{"x": -5, "y": 3, "w": 10, "h": 5}]},
+        {"id": "blue", "name": "蓝裤"},
+        {"id": "black", "name": "黑裤"},
     ],
     "accessory": [
-        {"id": "none", "name": "无", "color": Color.WHITE, "parts": []},
-        {"id": "glasses", "name": "眼镜", "color": Color8(30, 30, 30),
-         "parts": [
-            {"x": -4, "y": -6, "w": 3, "h": 2},
-            {"x": 1, "y": -6, "w": 3, "h": 2},
-            {"x": -1, "y": -5, "w": 2, "h": 1},  # 鼻梁
-         ]},
+        {"id": "none", "name": "无"},
+        {"id": "glasses", "name": "眼镜"},
     ],
 }
 
@@ -75,7 +49,7 @@ var _current: Dictionary = {
     "hair": "spike", "skin": "medium", "shirt": "red", "pants": "blue", "accessory": "none"
 }
 var _layer_buttons: Dictionary = {}  # {"hair": [Button, ...], ...}
-var _preview_node: Node2D
+var _preview_sprite: Sprite2D
 var _summary_label: Label
 
 
@@ -131,10 +105,11 @@ func _build_ui() -> void:
     frame_label.position = Vector2(40, 110)
     canvas.add_child(frame_label)
 
-    _preview_node = Node2D.new()
-    _preview_node.position = Vector2(220, 370)  # preview frame 中心
-    _preview_node.scale = Vector2(PREVIEW_SCALE, PREVIEW_SCALE)
-    canvas.add_child(_preview_node)
+    _preview_sprite = Sprite2D.new()
+    _preview_sprite.position = Vector2(220, 370)
+    _preview_sprite.scale = Vector2(PREVIEW_SCALE, PREVIEW_SCALE)
+    _preview_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+    canvas.add_child(_preview_sprite)
 
     # 摘要 (当前组合)
     _summary_label = Label.new()
@@ -205,41 +180,11 @@ func _build_ui() -> void:
 # =====================================================================
 
 func _refresh_preview() -> void:
-    if not _preview_node:
+    if not _preview_sprite:
         return
-    for child in _preview_node.get_children():
-        child.queue_free()
-    # 顺序: pants -> body (skin) -> shirt -> hair -> accessory -> face
-    _draw_layer("pants")
-    _draw_layer("skin")
-    _draw_layer("shirt")
-    _draw_layer("hair")
-    _draw_layer("accessory")
-    # 脸 (小点, 不管 hair 都显示)
-    var eyes := ColorRect.new()
-    eyes.color = Color.BLACK
-    eyes.size = Vector2(2, 2)
-    eyes.position = Vector2(-3, -5)
-    _preview_node.add_child(eyes)
-    var eye2 := ColorRect.new()
-    eye2.color = Color.BLACK
-    eye2.size = Vector2(2, 2)
-    eye2.position = Vector2(1, -5)
-    _preview_node.add_child(eye2)
-
-
-func _draw_layer(layer_id: String) -> void:
-    var opt_id: String = _current[layer_id]
-    var opt: Dictionary = _get_option(layer_id, opt_id)
-    if opt == null:
-        return
-    for part in opt["parts"]:
-        var rect := ColorRect.new()
-        rect.color = opt["color"]
-        rect.size = Vector2(part["w"], part["h"])
-        rect.position = Vector2(part["x"] - 8, part["y"] - 8)  # 中心化
-        rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
-        _preview_node.add_child(rect)
+    var frames: SpriteFrames = PlayerClass.build_avatar_frames(_current)
+    if frames.has_animation("idle_down"):
+        _preview_sprite.texture = frames.get_frame_texture("idle_down", 0)
 
 
 func _refresh_summary() -> void:

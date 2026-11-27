@@ -14,6 +14,7 @@ from ..core.gridifier import (
     route_along_roads, apply_path_overlay, carve_route_passages,
 )
 from ..core.gcj02 import gcj02_to_wgs84, wgs84_to_gcj02, gcj02_to_wgs84_points
+from ..core.stops import build_stops
 from ..core.tiling import slice_around_path, lnglat_to_grid_cell
 from ..core.schema import Waypoint, Dialog, POI, TransitMarker, InteriorSlot
 from ..clients.osm import OsmClient, parse_overpass
@@ -276,6 +277,7 @@ class CoordsMode(BaseMode):
                     ))
                 transit_offset += seg_durations[i]
         p.path.sort(key=lambda w: w.t)
+        p.stops = build_stops(p, coords_wgs, bbox, parsed_osm)
         print(f"[coords] Path waypoints: {len(p.path)} (walking={walking_total:.0f}s, "
               f"transit={transit_total:.0f}s)")
 

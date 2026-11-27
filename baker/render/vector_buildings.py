@@ -1,7 +1,7 @@
 """Generic smooth vector building rendering.
 
-Big buildings are drawn as ONE smooth shape (flat roof + ridge + wall +
-door/window) instead of cell-by-cell tiles, so they stop reading as a
+Big buildings are drawn as one shape with roof, eaves and street-facing
+walls instead of cell-by-cell tiles, so they stop reading as a
 stack of blocks. Small houses keep the tile look - a FireRed small house
 is meant to be tiles.
 
@@ -41,10 +41,7 @@ PALACE_WALL = (196, 48, 40)
 PALACE_WALL_DK = (140, 30, 26)
 WINDOW = (58, 82, 124)
 WINDOW_LT = (140, 180, 220)
-DOOR = (122, 82, 42)
-DOOR_DK = (88, 58, 28)
-GOLD = (250, 210, 90)
-GOLD_DK = (70, 40, 30)
+GROUND_SHADOW = (132, 125, 109)
 
 # "large" threshold, same as export_buildings.py
 AREA_MIN = 30.0
@@ -130,19 +127,6 @@ def _chord(pts, c, d):
     return (min(ts), max(ts))
 
 
-def _outward_normal(a, b, centre):
-    """Unit normal to edge a->b pointing away from the polygon centre."""
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    L = math.hypot(dx, dy)
-    if L < 1e-9:
-        return (0.0, 0.0)
-    nx, ny = dy / L, -dx / L
-    mx, my = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
-    if (mx - centre[0]) * nx + (my - centre[1]) * ny < 0:
-        nx, ny = -nx, -ny
-    return (nx, ny)
-
-
 def _point_in_poly(px, py, pts):
     inside = False
     n = len(pts)
@@ -206,6 +190,29 @@ def match_buildings(buildings, blob_id, grid, W, H):
 
 
 # ---- drawing one vector building ----
+def _draw_facade(dr, a, b, depth, wall, trim, palace):
+    """Extrude one roof edge toward the viewer and shade the ground below it."""
+    ax, ay = a
+    bx, by = b
+    dr.polygon([a, b, (bx, by + depth), (ax, ay + depth)], fill=wall)
+    dr.line([(ax, ay + depth + 2), (bx, by + depth + 2)],
+            fill=GROUND_SHADOW, width=3)
+    dr.line([(ax, ay + depth), (bx, by + depth)], fill=trim, width=2)
+
+    # These are decorative windows, not entrances on the real map.
+    if depth < 7:
+        return
+    bays = int(math.hypot(bx - ax, by - ay) // 18)
+    for index in range(bays):
+        t = (index + 0.5) / bays
+        x = ax + (bx - ax) * t
+        y = ay + (by - ay) * t + depth * 0.55
+        dr.rectangle((x - 3, y - 2, x + 3, y + 2),
+                     fill=trim if palace else WINDOW)
+        if not palace:
+            dr.line([(x - 2, y - 1), (x + 2, y - 1)], fill=WINDOW_LT)
+
+
 def draw_building(dr, pts, palette, palace, is_building, T, ridge=True):
     """Draw one building as a single smooth shape on a 1x base image.
     pts: polygon in float grid coords. palette: (base, lt, dk) roof colours.
@@ -217,33 +224,29 @@ def draw_building(dr, pts, palette, palace, is_building, T, ridge=True):
     would cut straight through them)."""
     base, lt, dk = palette
     wall = PALACE_WALL if palace else WALL
-    # pixel coords
+    trim = PALACE_WALL_DK if palace else WALL_DK
     px = [(x * T, y * T) for x, y in pts]
     centre = _area_centroid(pts)
-    n = len(pts)
-    # south edges: outward normal points down (screen +y)
-    south = []  # (a, b, length, normal) in grid coords
-    for i in range(n):
-        a, b = pts[i], pts[(i + 1) % n]
-        if math.hypot(b[0] - a[0], b[1] - a[1]) < 0.2:
+    edges = list(zip(pts, pts[1:] + pts[:1]))
+    signed_area = sum(a[0] * b[1] - b[0] * a[1] for a, b in edges)
+    winding = 1 if signed_area >= 0 else -1
+    # Project only exposed edges facing the viewer, including concave façades.
+    for a, b in edges:
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length = math.hypot(dx, dy)
+        if length < 0.2:
             continue
-        nx, ny = _outward_normal(a, b, centre)
+        nx, ny = winding * dy / length, -winding * dx / length
         if ny <= 0.2:
             continue
-        # skip edges shared with another polygon of the same blob:
-        # the cell just outside the edge is still a building cell
         mx, my = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
-        ox, oy = int(mx + nx * 0.7), int(my + ny * 0.7)
+        ox, oy = math.floor(mx + nx * 0.7), math.floor(my + ny * 0.7)
         if is_building(ox, oy):
             continue
-        south.append((a, b, math.hypot(b[0] - a[0], b[1] - a[1]), (nx, ny)))
-    south.sort(key=lambda e: -e[2])
-    # wall band first: the roof covers its inner half, only the outer
-    # strip shows, like the Hengfeng building
-    for a, b, _L, _n in south:
         pa = (a[0] * T, a[1] * T)
         pb = (b[0] * T, b[1] * T)
-        dr.line([pa, pb], fill=wall, width=int(1.5 * T), joint="curve")
+        depth = max(3, round(T * 0.7 * ny))
+        _draw_facade(dr, pa, pb, depth, wall, trim, palace)
     # roof: one flat polygon, no shingle grid, no seams
     dr.polygon(px, fill=base)
     # ridge: longest axis through the centroid, endpoints inside the roof.
@@ -264,25 +267,6 @@ def draw_building(dr, pts, palette, palace, is_building, T, ridge=True):
                         fill=lt, width=5)
     # outline
     dr.line(px + [px[0]], fill=dk, width=3, joint="curve")
-    # door on the longest south edge, window on the second-longest
-    if south:
-        a, b, _L, (nx, ny) = south[0]
-        mx, my = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
-        dc = ((mx + nx * 7.0 / T) * T, (my + ny * 7.0 / T) * T)
-        dr.rectangle([dc[0] - 5, dc[1] - 6, dc[0] + 5, dc[1] + 6], fill=DOOR_DK)
-        dr.rectangle([dc[0] - 3, dc[1] - 6, dc[0] + 3, dc[1] + 6], fill=DOOR)
-        if palace:
-            dr.rectangle([dc[0] - 4, dc[1] - 4, dc[0] - 2, dc[1] - 2], fill=GOLD)
-            dr.rectangle([dc[0] + 2, dc[1] + 1, dc[0] + 4, dc[1] + 3], fill=GOLD)
-    if len(south) >= 2:
-        a, b, _L, (nx, ny) = south[1]
-        mx, my = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
-        wc = ((mx + nx * 7.0 / T) * T, (my + ny * 7.0 / T) * T)
-        if palace:
-            dr.rectangle([wc[0] - 6, wc[1] - 5, wc[0] + 6, wc[1] + 5], fill=GOLD)
-            dr.rectangle([wc[0] - 3, wc[1] - 2, wc[0] + 3, wc[1] + 2], fill=GOLD_DK)
-        else:
-            dr.rectangle([wc[0] - 6, wc[1] - 5, wc[0] + 6, wc[1] + 5], fill=WINDOW)
 
 
 # ---- one roof piece per building (the blob fix) ----

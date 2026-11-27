@@ -24,6 +24,7 @@ from ..core.gridifier import (
 from ..core.gcj02 import gcj02_to_wgs84, wgs84_to_gcj02, gcj02_to_wgs84_points
 from ..core.tiling import slice_around_path, lnglat_to_grid_cell
 from ..core.time_scale import normalize_dialog_times
+from ..core.stops import build_stops
 from ..core.schema import Waypoint, Dialog, POI, TransitMarker, InteriorSlot
 from ..clients.amap import AmapClient
 from ..clients.llm import LLMClient
@@ -385,6 +386,13 @@ class TextMode(BaseMode):
 
         # 按 t 排序
         p.path.sort(key=lambda w: w.t)
+        if last_walk_j is not None and first_walk_i is not None:
+            playable_stops = slice(first_walk_i, last_walk_j + 2)
+            p.stops = build_stops(p, coords_wgs[playable_stops], bbox, parsed_osm,
+                                  [place["name"] for place in geo_results[playable_stops]])
+        else:
+            p.stops = build_stops(p, coords_wgs, bbox, parsed_osm,
+                                  [place["name"] for place in geo_results])
         cum_time = walking_total
         print(f"[text] Path waypoints: {len(p.path)} (walking={walking_total:.0f}s, "
               f"transit={transit_total:.0f}s 未计入 path/总时长, total={cum_time:.0f}s)")

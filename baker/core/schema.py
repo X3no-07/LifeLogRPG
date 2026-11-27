@@ -159,6 +159,21 @@ class InteriorSlot:
 
 
 @dataclass
+class Stop:
+    """回放途经地点。坐标是地图格坐标，轮廓保留 OSM 投影后的格内小数。"""
+    x: float
+    y: float
+    t: float
+    name: str = ""
+    category: str = ""
+    outline: List[List[float]] = field(default_factory=list)
+    entrance: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class LogPayload:
     """完整烘焙输出"""
     meta: Meta = field(default_factory=Meta)
@@ -169,9 +184,10 @@ class LogPayload:
     pois: List[POI] = field(default_factory=list)              # P0.3 新增
     transit_markers: List[TransitMarker] = field(default_factory=list)  # P0.4 新增
     interiors: List[InteriorSlot] = field(default_factory=list)  # P1.3 新增
+    stops: List[Stop] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "meta": self.meta.to_dict(),
             "map": self.map.to_dict(),
             "path": [w.to_dict() for w in self.path],
@@ -181,3 +197,6 @@ class LogPayload:
             "transit_markers": [m.to_dict() for m in self.transit_markers],  # P0.4
             "interiors": [i.to_dict() for i in self.interiors],       # P1.3
         }
+        if self.stops:
+            result["stops"] = [stop.to_dict() for stop in self.stops]
+        return result

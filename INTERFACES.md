@@ -126,7 +126,8 @@ python -m baker.cli [OPTIONS]
   "characters":      [ /* Character, ... */ ],
   "pois":            [ /* POI, ... */ ],
   "transit_markers": [ /* TransitMarker, ... */ ],
-  "interiors":       [ /* InteriorSlot, ... */ ]
+  "interiors":       [ /* InteriorSlot, ... */ ],
+  "stops":           [ /* Stop, ... */ ]
 }
 ```
 
@@ -196,6 +197,18 @@ python -m baker.cli [OPTIONS]
 | `name` | string | `"Me"` |
 | `color` | string (hex) | `"#f2cc2c"` |
 | `sprite` | string | `""` (P2.3 捏脸) |
+
+### 2.7 Stop（可选）
+
+`stops` 按回放时间排列。缺少该字段的旧档仍可播放，播放器使用最后一个路径点显示终点。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `x`, `y` | number | 标记位置，按路径点的格中心约定投影 |
+| `t` | number | 到站秒数，随路线缩放 |
+| `name`, `category` | string | 地点和类别，缺少可靠信息时可为空 |
+| `outline` | number[][] | 可选的建筑轮廓，从网格原点计量，每点为 `[x, y]` |
+| `entrance` | bool | `true` 表示标记使用了地图中已有的入口 |
 
 ## 3. config.json 接口
 

@@ -29,6 +29,7 @@ var _pois: Array = []
 var _transit_markers: Array = []   # P0.4
 var _building_heights: Array = []   # P1.2 (跟 grid 同步, 0=无建筑)
 var _interiors: Array = []          # P1.3 (室内 slot: 咖啡厅/办公室/etc.)
+var _stops: Array[Dictionary] = []
 var _log_path: String = ""          # P1.4 本次加载的 JSON 路径 (派生渲染图路径)
 
 
@@ -44,6 +45,7 @@ func load(path: String) -> Dictionary:
     _transit_markers = []
     _building_heights = []
     _interiors = []
+    _stops.clear()
 
     if not FileAccess.file_exists(path):
         push_error("LogLoader: file not found: " + path)
@@ -61,6 +63,7 @@ func load(path: String) -> Dictionary:
 
     _raw = json.data
     _validate(_raw)
+    _load_stops(_raw.get("stops", []))
     return _raw
 
 
@@ -145,6 +148,43 @@ func _validate(payload: Dictionary) -> void:
                 tm[k] = -1   # -1 表示超出 grid, Godot 端决定是否画边缘 pin
 
 
+func _load_stops(raw_stops: Variant) -> void:
+    var duration := get_total_duration()
+    if raw_stops is Array:
+        for item in raw_stops:
+            if not item is Dictionary:
+                continue
+            var valid_numbers := true
+            for key in ["x", "y", "t"]:
+                if typeof(item.get(key)) not in [TYPE_INT, TYPE_FLOAT]:
+                    valid_numbers = false
+                    break
+            if not valid_numbers:
+                continue
+            var x := float(item["x"])
+            var y := float(item["y"])
+            var time := float(item["t"])
+            if not (x >= 0 and x < get_grid_width() and y >= 0 and y < get_grid_height()):
+                continue
+            if not (time >= 0 and time <= duration + 0.001):
+                continue
+            _stops.append(item)
+    if not _stops.is_empty() or _waypoints.is_empty():
+        return
+
+    # 旧存档只记录了路线。沿用明确的终点名称或显示通用终点。
+    var endpoint: Dictionary = _waypoints[-1]
+    if not endpoint.has("x") or not endpoint.has("y"):
+        return
+    var label := String(endpoint.get("label", "")).strip_edges()
+    label = label.trim_suffix("_arrive")
+    for prefix in ["pt_", "step_"]:
+        if label.begins_with(prefix):
+            label = ""
+            break
+    _stops.append({"x": endpoint["x"], "y": endpoint["y"], "t": duration, "name": label})
+
+
 # ----- 访问器 -----
 
 func get_waypoints() -> Array:
@@ -163,6 +203,10 @@ func get_log_meta() -> Dictionary:
 func get_pois() -> Array:
     """返回 POI 列表 (P0.3 新增)"""
     return _pois
+
+
+func get_stops() -> Array[Dictionary]:
+    return _stops
 
 func get_transit_markers() -> Array:
     """返回 TransitMarker 列表 (P0.4 新增)

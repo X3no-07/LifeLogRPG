@@ -86,6 +86,10 @@ var path_overlay: Node2D
 var npc_layer: Node2D
 var tile_set: TileSet
 var interior_set: TileSet          # P1.3 室内 icon 用独立 TileSet (避免跟地形冲突)
+var _stop_fill: Polygon2D
+var _stop_outline: Line2D
+var _stop_pin: Node2D
+var _stop_pin_center: Polygon2D
 
 
 # =====================================================================
@@ -300,6 +304,65 @@ func build(loader) -> void:
     # P1.3: 室内 slots (图里没有 icon, 两种模式都画)
     if loader.get_interiors().size() > 0:
         render_interior_slots(loader.get_interiors())
+
+
+func show_stop(stop: Dictionary, arrived: bool) -> void:
+    if _stop_pin == null:
+        _build_stop_overlay()
+    var accent := Color("66e6c7") if arrived else Color("ffd474")
+    _stop_pin.position = (Vector2(float(stop["x"]), float(stop["y"])) + Vector2(0.5, 0.5)) * tile_size
+    _stop_pin.scale.x = -1.0 if float(stop["x"]) >= grid_w * 0.5 else 1.0
+    _stop_pin_center.color = accent
+
+    var outline := PackedVector2Array()
+    var vertices: Variant = stop.get("outline", [])
+    if arrived and vertices is Array:
+        for vertex in vertices:
+            if vertex is Array and vertex.size() == 2:
+                outline.append(Vector2(float(vertex[0]), float(vertex[1])) * tile_size)
+    _stop_fill.visible = outline.size() >= 3
+    _stop_outline.visible = _stop_fill.visible
+    if _stop_fill.visible:
+        _stop_fill.polygon = outline
+        _stop_fill.color = Color(accent, 0.15)
+        _stop_outline.points = outline
+        _stop_outline.default_color = accent
+
+
+func _build_stop_overlay() -> void:
+    var layer := Node2D.new()
+    layer.name = "RouteStop"
+    layer.z_index = 4
+    add_child(layer)
+    _stop_fill = Polygon2D.new()
+    layer.add_child(_stop_fill)
+    _stop_outline = Line2D.new()
+    _stop_outline.closed = true
+    _stop_outline.width = 2.0
+    layer.add_child(_stop_outline)
+
+    _stop_pin = Node2D.new()
+    layer.add_child(_stop_pin)
+    var pointer := Line2D.new()
+    pointer.points = PackedVector2Array([Vector2.ZERO, Vector2(16, -4)])
+    pointer.width = 2.0
+    pointer.default_color = Color("192d34")
+    _stop_pin.add_child(pointer)
+    var rim := Polygon2D.new()
+    rim.color = Color("192d34")
+    rim.position.x = 16
+    rim.polygon = PackedVector2Array([
+        Vector2(0, 1), Vector2(-6, -5), Vector2(-6, -10), Vector2(0, -15),
+        Vector2(6, -10), Vector2(6, -5),
+    ])
+    _stop_pin.add_child(rim)
+    _stop_pin_center = Polygon2D.new()
+    _stop_pin_center.position.x = 16
+    _stop_pin_center.polygon = PackedVector2Array([
+        Vector2(0, -2), Vector2(-4, -6), Vector2(-4, -9), Vector2(0, -12),
+        Vector2(4, -9), Vector2(4, -6),
+    ])
+    _stop_pin.add_child(_stop_pin_center)
 
 
 # =====================================================================

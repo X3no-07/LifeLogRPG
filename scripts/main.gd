@@ -48,6 +48,9 @@ var camera: Camera2D
 # 数据 (来自 loader)
 var waypoints: Array = []
 var dialogs: Array = []
+var stops: Array[Dictionary] = []
+var _displayed_stop: int = -1
+var _displayed_arrived: bool = false
 
 
 func _ready() -> void:
@@ -138,6 +141,7 @@ func _load_log() -> void:
         push_warning("log 加载失败, 使用空数据")
     waypoints = loader.get_waypoints()
     dialogs = loader.get_dialogs()
+    stops = loader.get_stops()
 
 
 func _build_modules() -> void:
@@ -207,6 +211,8 @@ func _build_modules() -> void:
 
     # 天气粒子 (根据 meta.weather, 必须 add 到 world 跟随相机)
     var meta: Dictionary = loader.get_log_meta()
+    if "[OSM]" in String(meta.get("raw_text", "")):
+        ui_sys.show_map_attribution()
     weather = WeatherSystemClass.new()
     weather.name = "Weather"
     world.add_child(weather)
@@ -216,10 +222,12 @@ func _build_modules() -> void:
 
 func _wire_signals() -> void:
     playback.time_changed.connect(_on_time_changed)
+    ui_sys.progress_bar.gui_input.connect(_seek_from_progress_bar)
 
 
 func _start() -> void:
     playback.start()
+    _update_destination()
     ui_sys.update_status(loader.get_log_meta().get("title", "Log"),
                          loader.get_log_meta().get("mood", "calm"))
     # 把天气状态显示到 UI
@@ -245,10 +253,34 @@ func _process(delta: float) -> void:
 
 
 func _on_time_changed(_t: float) -> void:
+    _refresh_playback_ui()
+    _check_transport_change()
+
+
+func _refresh_playback_ui() -> void:
     ui_sys.update_progress(playback.current_time, playback.total_duration)
     ui_sys.update_speed(playback.is_playing, playback.play_speed, playback.current_time, playback.total_duration)
-    _check_transport_change()
     _update_dialog()
+    _update_destination()
+
+
+func _update_destination() -> void:
+    if stops.is_empty():
+        return
+    var now: float = playback.current_time
+    var index: int = stops.size() - 1
+    var arrived := true
+    for i in range(stops.size()):
+        if now < float(stops[i]["t"]):
+            arrived = i > 0 and now - float(stops[i - 1]["t"]) < 2.0
+            index = i - 1 if arrived else i
+            break
+    if index == _displayed_stop and arrived == _displayed_arrived:
+        return
+    _displayed_stop = index
+    _displayed_arrived = arrived
+    world.show_stop(stops[index], arrived)
+    ui_sys.update_destination(stops[index], arrived, index == stops.size() - 1)
 
 
 # =====================================================================
@@ -274,7 +306,10 @@ func _update_player_position() -> void:
     var bx: float = int(b.get("x", 0)) * tile_size + tile_size / 2.0
     var by: float = int(b.get("y", 0)) * tile_size + tile_size / 2.0
     player.position = Vector2(lerp(ax, bx, ratio), lerp(ay, by, ratio))
-    _update_facing_direction(i, a, b)
+    var heading := Vector2(bx - ax, by - ay)
+    var moving: bool = (playback.is_playing and not transport.is_in_transition()
+        and tb > ta and not heading.is_zero_approx())
+    player.set_walk_state(heading, moving)
 
 
 func _find_segment(t: float) -> int:
@@ -282,24 +317,6 @@ func _find_segment(t: float) -> int:
         if t >= float(waypoints[k].get("t", 0)) and t <= float(waypoints[k + 1].get("t", 0)):
             return k
     return waypoints.size() - 2
-
-
-func _update_facing_direction(i: int, a: Dictionary, b: Dictionary) -> void:
-    var eye: Node = player.get_eye_node() if player else null
-    if not eye:
-        return
-    var s: float = float(loader.get_tile_size())
-    var ax: float = int(a.get("x", 0))
-    var ay: float = int(a.get("y", 0))
-    var bx: float = int(b.get("x", 0))
-    var by: float = int(b.get("y", 0))
-    var dir := Vector2(bx - ax, by - ay)
-    if dir.length() < 0.01:
-        return
-    if abs(dir.x) > abs(dir.y):
-        eye.position = Vector2(s * 0.05 if dir.x > 0 else -s * 0.15, -s * 0.6)
-    else:
-        eye.position = Vector2(0, -s * 0.65 if dir.y < 0 else -s * 0.55)
 
 
 func _update_camera() -> void:
@@ -387,16 +404,28 @@ func _update_dialog() -> void:
 func _unhandled_input(event: InputEvent) -> void:
     if event.is_action_pressed("play_pause"):
         playback.toggle()
+        _refresh_playback_ui()
     elif event.is_action_pressed("play_speed_up"):
         playback.bump_speed_up()
+        _refresh_playback_ui()
     elif event.is_action_pressed("play_speed_down"):
         playback.bump_speed_down()
+        _refresh_playback_ui()
     elif event is InputEventKey and event.pressed and event.keycode == KEY_R:
         playback.reset()
-        _current_dialog_idx = -1
-    elif event is InputEventMouseButton and event.pressed and ui_sys.progress_bar:
-        var bar: ProgressBar = ui_sys.progress_bar
-        if bar.get_global_rect().has_point(event.position):
-            var ratio: float = (event.position.x - bar.global_position.x) / max(bar.size.x, 1.0)
-            playback.seek_to(clamp(ratio, 0.0, 1.0) * playback.total_duration)
-            _current_dialog_idx = -1
+        _seek(0.0)
+
+
+func _seek_from_progress_bar(event: InputEvent) -> void:
+    if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+        var ratio: float = event.position.x / maxf(ui_sys.progress_bar.size.x, 1.0)
+        _seek(ratio * playback.total_duration)
+        ui_sys.progress_bar.accept_event()
+
+
+func _seek(time: float) -> void:
+    playback.seek_to(time)
+    var mode := _get_transport_at(playback.current_time)
+    if not mode.is_empty():
+        transport.sync_current(mode)
+    _refresh_playback_ui()

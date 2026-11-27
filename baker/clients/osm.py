@@ -81,6 +81,8 @@ class OsmClient:
             f"  way[\"natural\"]({bbox_str});\n"
             f"  way[\"amenity\"=\"parking\"]({bbox_str});\n"
             f"  way[\"highway\"=\"pedestrian\"]({bbox_str});\n"
+            f"  node[\"entrance\"]({bbox_str});\n"
+            f"  node[\"name\"][~\"^(amenity|shop|office|tourism|leisure|railway)$\"~\".\"]({bbox_str});\n"
             f");\n"
             f"out body;\n"
             f">;\n"
@@ -158,19 +160,23 @@ class OsmClient:
 
 def parse_osm_api_xml(xml_text: str) -> Dict[str, Any]:
     """把 OSM API 的 XML 转成 {"elements": [...]}。
-    node -> {"type": "node", "id", "lat", "lon"}
+    node -> {"type": "node", "id", "lat", "lon", "tags"（如有）}
     way  -> {"type": "way", "id", "nodes": [ref...], "tags": {k: v}}
     relation 不参与烘焙, 跳过。
     """
     root = ET.fromstring(xml_text)
     elements: List[Dict[str, Any]] = []
     for node in root.findall("node"):
-        elements.append({
+        element = {
             "type": "node",
             "id": int(node.get("id", "0")),
             "lat": float(node.get("lat", "0")),
             "lon": float(node.get("lon", "0")),
-        })
+        }
+        tags = {t.get("k", ""): t.get("v", "") for t in node.findall("tag")}
+        if tags:
+            element["tags"] = tags
+        elements.append(element)
     for way in root.findall("way"):
         tags = {t.get("k", ""): t.get("v", "") for t in way.findall("tag")}
         elements.append({
@@ -258,10 +264,27 @@ def parse_overpass(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     elements = raw.get("elements", [])
     # 1) 收集所有 node (lat, lon) -> 内部统一 (lng, lat) 跟高德 polyline 一致
     nodes_by_id: Dict[str, Tuple[float, float]] = {}
+    node_tags: Dict[str, Dict[str, str]] = {}
     for el in elements:
         if el.get("type") == "node":
             # 输出 (lng, lat) 顺序
             nodes_by_id[str(el["id"])] = (el["lon"], el["lat"])
+            if el.get("tags"):
+                node_tags[str(el["id"])] = el["tags"]
+    places = []
+    entrances = {}
+    for node_id, tags in node_tags.items():
+        name = _place_name(tags)
+        interior = _classify_interior(tags)
+        if name and (interior or any(key in tags for key in (
+            "amenity", "tourism", "leisure", "railway", "shop", "office"
+        ))):
+            places.append({"name": name, "point": nodes_by_id[node_id], "tags": tags})
+        entrance_type = tags.get("entrance")
+        if entrance_type in {"main", "yes", "entrance"} and tags.get("access") in {
+            None, "yes", "public", "permissive", "customers",
+        }:
+            entrances[node_id] = nodes_by_id[node_id]
     # 2) 解析 way
     roads: List[Dict[str, Any]] = []
     buildings: List[Dict[str, Any]] = []
@@ -304,11 +327,14 @@ def parse_overpass(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
             interior = _classify_interior(tags)
             buildings.append({
                 "building": tags.get("building", tags.get("building:part", "yes")),
-                "name": tags.get("name", ""),
+                "name": _place_name(tags),
                 "levels": levels,
                 "interior": interior,   # P1.3: {category, raw_tag} or None
                 "part": "building:part" in tags and "building" not in tags,
                 "nodes": coords,
+                "tags": tags,
+                "entrances": list(dict.fromkeys(entrances[str(nid)] for nid in node_ids
+                                                   if str(nid) in entrances)),
             })
         elif "waterway" in tags or tags.get("natural") == "water":
             water.append({
@@ -370,7 +396,12 @@ def parse_overpass(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
                 "holes": holes,
             })
     return {"roads": roads, "buildings": buildings, "water": water,
-            "green": green, "ground": ground}
+            "green": green, "ground": ground, "places": places}
+
+
+def _place_name(tags: Dict[str, str]) -> str:
+    """优先使用地图数据中已有的中文名称。"""
+    return tags.get("name:zh-Hans") or tags.get("name:zh") or tags.get("name", "")
 
 
 # ----------------------------------------------------------------------------

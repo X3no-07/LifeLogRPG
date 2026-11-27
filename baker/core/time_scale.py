@@ -1,6 +1,6 @@
 """时间缩放 (P1.5)
 
-把 waypoint / dialog 的 t 等比例压缩到目标时长。
+把路径点、对白和停靠点的 t 等比例压缩到目标时长。
 例: 真实 1h 步行 -> 朋友圈 30s 视频, 压缩 120x。
 """
 from typing import Any, Dict, List, Union
@@ -12,7 +12,7 @@ PayloadType = Union[LogPayload, Dict[str, Any]]
 
 
 def apply_time_scale(payload: PayloadType, target_duration: float) -> None:
-    """原地修改 payload, 把 path[*].t 和 dialogs[*].t 等比例缩放到 target_duration 秒
+    """原地修改 payload，把路径点、对白和停靠点的 t 等比例缩放到目标时长。
     payload 可以是 LogPayload (新接口) 或 dict (兼容旧调用)
     """
     if target_duration <= 0:
@@ -33,6 +33,8 @@ def _apply_to_obj(payload: LogPayload, target_duration: float) -> None:
         wp.t = round(wp.t * scale, 2)
     for dlg in payload.dialogs:
         dlg.t = round(dlg.t * scale, 2)
+    for stop in payload.stops:
+        stop.t = round(stop.t * scale, 2)
     payload.meta.original_duration_sec = max_t
     payload.meta.scaled_duration_sec = target_duration
     print(f"[time_scale] {max_t:.1f}s -> {target_duration:.1f}s (压缩 {1/scale:.1f}x)")
@@ -51,6 +53,9 @@ def _apply_to_dict(payload: Dict[str, Any], target_duration: float) -> None:
     for dlg in payload.get("dialogs", []):
         if "t" in dlg:
             dlg["t"] = round(dlg["t"] * scale, 2)
+    for stop in payload.get("stops", []):
+        if "t" in stop:
+            stop["t"] = round(stop["t"] * scale, 2)
     meta = payload.setdefault("meta", {})
     meta["original_duration_sec"] = max_t
     meta["scaled_duration_sec"] = target_duration
