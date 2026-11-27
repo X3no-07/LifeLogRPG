@@ -449,11 +449,17 @@ def _seg_closest(px: float, py: float, ax: float, ay: float,
 
 def _route_cell_cost(cell: int):
     """进该格的代价; None = 不可走。
-    路/广场/人行道 1.0 (首选); 草地 20.0、树 40.0 (只在没路时借道,
-    绝不为抄近道横切草坪/树林, 路线必须贴着路走); 楼/水/POI 标记
-    不可走。"""
-    if cell in (CELL_ROAD, CELL_PLAZA, CELL_SIDEWALK):
+    路/人行道 1.0 (首选, 贴着真路走); 广场 5.0 (能走但不优先):
+    网格底色默认就是广场 (有 ground 数据时整图铺广场, 实测占 78%),
+    广场跟路同价时 A* 直接横切广场抄近道、根本不贴灰色道路走,
+    画出来的红线就是横穿空地的大斜线。广场 5.0 后, A* 宁可绕路也
+    跟着路网走, 只在没路可走 (进广场深处的 POI、路网断口) 时才借
+    道穿广场; 草地 20.0、树 40.0 (只在没路时借道, 绝不为抄近道横
+    切草坪/树林); 楼/水/POI 标记不可走。"""
+    if cell in (CELL_ROAD, CELL_SIDEWALK):
         return 1.0
+    if cell == CELL_PLAZA:
+        return 5.0
     if cell == CELL_GRASS:
         return 20.0
     if cell == CELL_TREE:
@@ -487,7 +493,8 @@ def snap_to_passable(grid: Grid, x: float, y: float) -> Tuple[int, int]:
 
 def _astar_cell_cost(cell: int, on_road: bool = False) -> float:
     """A* 进该格的代价。
-    路/广场/人行道 1.0; 草地 20.0; 树 40.0 (只在没路时借道, 不抄近道)。
+    路/人行道 1.0; 广场 5.0 (能走但不优先, 见 _route_cell_cost);
+    草地 20.0; 树 40.0 (只在没路时借道, 不抄近道)。
     楼/水原则上不可走, 但路网常被楼/水切断 (宫墙、门洞、河):
     - on_road=True (该格有 OSM 路穿过, 比如门洞、桥) -> 20.0,
       寻路会在这儿过, 且只走最窄的一处;
@@ -549,8 +556,8 @@ def find_path_on_grid(grid: Grid, start: Tuple[int, int],
                       road_mask=None, water_mask=None) -> List[Tuple[int, int]]:
     """A* 沿可走格从 start 走到 end (含两端)。
     八方向, 斜走不切角 (两边正交格都得是真可走格, 不从楼角斜穿过去);
-    代价按进格的 cell 类型 (路 1, 草 4, 树 8, 有路穿过的楼/水 20,
-    实心楼/水 500), 启发式是 octile 距离。
+    代价按进格的 cell 类型 (路/人行道 1, 广场 5, 草 20, 树 40,
+    有路穿过的楼/水 20, 实心楼/水 500), 启发式是 octile 距离。
     起/终点本身在楼/水里时先吸附到可走格。实在无路时回退成直线,
     保证调用方总有路线。
     road_mask: _road_proximity_mask() 的返回值 (没有就全按 500 算)。
@@ -749,10 +756,18 @@ def _near_path_mask(pts, w: int, h: int, radius: float) -> set:
 def _segment_crosses_blocked(grid: Grid, x0: int, y0: int, x1: int, y1: int,
                              blocked=(CELL_BUILDING, CELL_WATER,
                                       CELL_GRASS, CELL_TREE),
-                             near_mask=None) -> bool:
-    """直线段 (x0,y0)->(x1,y1) 是否穿过不可走的格子、或跑出原路径的走廊。
+                             near_mask=None,
+                             min_road_share: float = 0.6,
+                             road_share_min_len: int = 5) -> bool:
+    """直线段 (x0,y0)->(x1,y1) 是否穿过不可走的格子、或跑出原路径的走廊、
+    或长时间脱离真路。
     直线段只能走铺装面 (路/广场/人行道): 穿楼/水/草/树都算不可走,
     拐弯抄近道切草坪、穿树林都不行, 路线必须贴着路走。
+    另外, 长直线段 (多于 road_share_min_len 格) 必须大半走在真路
+    (路/人行道) 上: 广场是底色、到处都是, 只禁楼/水/草/树的话,
+    直线横切整片广场也算"合规", 画出来就是横穿空地的大斜线、根本
+    不贴灰色道路。短段 (<= road_share_min_len 格) 豁免: 进出广场
+    深处的 POI、路网断口处接路, 本来就得短距离借道穿广场。
     采样 Bresenham 整数格; 起终点本身豁免 (它们是原路径上的点, 门洞那格
     本来就是楼格, 不能因此判整段不可走); 斜向步进时两边正交邻格也查,
     不从楼角/水角/草角斜切过去 (跟 find_path_on_grid 的不切角规则一致)。
@@ -764,6 +779,15 @@ def _segment_crosses_blocked(grid: Grid, x0: int, y0: int, x1: int, y1: int,
         if 0 <= x < w and 0 <= y < h and grid[y][x] in blocked:
             return True
         if near_mask is not None and (x, y) not in near_mask:
+            return True
+    # 长段必须大半走在真路上 (路/人行道), 不能横切广场: 广场只是底色,
+    # 不是路; 横切广场画出来就是空地上的大斜线。
+    if len(cells) > road_share_min_len and h > 0 and w > 0:
+        on_road = sum(
+            1 for (x, y) in cells
+            if 0 <= x < w and 0 <= y < h
+            and grid[y][x] in (CELL_ROAD, CELL_SIDEWALK))
+        if on_road / len(cells) < min_road_share:
             return True
     # 斜向步进的拐角检查只拦楼/水 (硬障碍): 拐角处贴草而过只是转弯,
     # 线上的格子本身仍是路, 不算切草坪; 楼/水角斜切会蹭进楼里/水里。
@@ -781,16 +805,22 @@ def smooth_path_on_grid(waypoints: List[Dict[str, int]], grid: Grid,
                         blocked=(CELL_BUILDING, CELL_WATER,
                                  CELL_GRASS, CELL_TREE),
                         max_deviation: float = 3.0,
+                        min_road_share: float = 0.6,
+                        road_share_min_len: int = 5,
                         ) -> List[Dict[str, int]]:
     """贪心视线法平滑逐格路径 (Bug 1: 路线楼梯状)。
 
     A* 出来的是逐格点列 (点距 1-2 格, 斜走 + 横平竖直交替 = 楼梯/
     锯齿), 试玩里红线和人物跟着楼梯走。从一点往前看, 能直线通到的
-    最远点就直连, 跳过中间不必要的拐点。直线段要同时过两关才直连:
+    最远点就直连, 跳过中间不必要的拐点。直线段要同时过三关才直连:
     1) 只走铺装面 (路/广场/人行道), 不穿楼/水、不切草坪、不穿树林
        (穿了就保留拐点, 路线必须贴着路走, 绝不抄近道横切草地);
     2) 不跑出原路径 max_deviation 格的走廊 (不抄近道横切街区、拐
-       大弯离路太远, 平滑完还是顺着原来的路走)。
+       大弯离路太远, 平滑完还是顺着原来的路走);
+    3) 长直线段必须大半走在真路 (路/人行道) 上 (见
+       _segment_crosses_blocked 的 min_road_share): 广场是底色、到
+       处都是, 只过前两关的话, 直线横切整片广场也算"合规", 画出来
+       就是横穿空地的大斜线、根本不贴灰色道路。
 
     waypoints: [{"x": int, "y": int}, ...]
         (route_along_roads / densify_and_snap_route 的输出格式)
@@ -817,7 +847,9 @@ def smooth_path_on_grid(waypoints: List[Dict[str, int]], grid: Grid,
         for j in range(anchor + 2, n):
             if _segment_crosses_blocked(grid, pts[anchor][0], pts[anchor][1],
                                         pts[j][0], pts[j][1], blocked,
-                                        near_mask=near_mask):
+                                        near_mask=near_mask,
+                                        min_road_share=min_road_share,
+                                        road_share_min_len=road_share_min_len):
                 break
             far = j
         keep.append(far)

@@ -39,7 +39,7 @@ def _all_passable(grid, path):
 class TestRouteCellCost:
     def test_costs(self):
         assert _route_cell_cost(CELL_ROAD) == 1.0
-        assert _route_cell_cost(CELL_PLAZA) == 1.0
+        assert _route_cell_cost(CELL_PLAZA) == 5.0
         assert _route_cell_cost(CELL_SIDEWALK) == 1.0
         assert _route_cell_cost(CELL_GRASS) == 20.0
         assert _route_cell_cost(CELL_TREE) == 40.0
@@ -708,7 +708,7 @@ class TestSmoothPathOnGrid:
                   "....rrrrr.",
                   "....r.....",
                   "ppppprrrrr")
-        # 从左上到右下: A* 会沿路走 (草 4、树 8, 路 1, 优先贴路)
+        # 从左上到右下: A* 会沿路走 (路 1, 广场 5, 草 20, 树 40, 优先贴路)
         raw = find_path_on_grid(g, (0, 0), (9, 7))
         assert raw, "A* 应该找得到路"
         wps = [{"x": x, "y": y} for x, y in raw]
@@ -721,3 +721,85 @@ class TestSmoothPathOnGrid:
             # 逐格复核: 每段直线上的每个格子都是铺装面
             for (x, y) in _straight_line_cells(a["x"], a["y"], b["x"], b["y"]):
                 assert g[y][x] in paved, (a, b, x, y, g[y][x])
+
+
+class TestRoadOverPlaza:
+    """广场不跟路同价: A* 宁可绕路也不横切广场, 平滑不拉空地大斜线。
+
+    回归: 广场是网格底色 (有 ground 数据时整图默认广场, 实测占 78%),
+    广场代价跟路一样 (1.0) 时, A* 直接横切广场抄近道, 画出来的红线
+    是横穿空地的大斜线、根本不贴灰色道路 (用户 2026-11-27 截图反馈)。
+    修法: 广场代价 1.0 -> 5.0; 长平滑段必须大半走在真路上。
+    """
+
+    def test_astar_prefers_road_detour_over_plaza_cut(self):
+        # U 形路绕着广场海: 起点左上、终点右上; 直线横切广场只有 12 格,
+        # 绕 U 形路要 23 格。广场 5.0 时必须走 U 形路, 不能横切。
+        g = _grid("r..........r",
+                  "rppppppppppr",
+                  "rppppppppppr",
+                  "rppppppppppr",
+                  "rppppppppppr",
+                  "rppppppppppr",
+                  "rrrrrrrrrrrr")
+        path = find_path_on_grid(g, (0, 0), (11, 0))
+        assert path, "A* 应该找得到路"
+        assert path[0] == (0, 0) and path[-1] == (11, 0)
+        # 全程走路格, 一个广场格都不踩 (广场 1.0 时会横切, 这个测试就挂)
+        for (x, y) in path:
+            assert g[y][x] == CELL_ROAD, (x, y, g[y][x])
+
+    def test_plaza_crossable_when_no_road(self):
+        # 没路可走时广场照样能穿 (宫里大院子、广场深处的 POI), 不能把路堵死
+        g = _grid("pppppppppp",
+                  "pppppppppp",
+                  "pppppppppp")
+        path = find_path_on_grid(g, (0, 0), (9, 2))
+        assert path, "纯广场也得找得到路"
+        assert path[0] == (0, 0) and path[-1] == (9, 2)
+        for (x, y) in path:
+            assert _route_cell_cost(g[y][x]) is not None
+
+    def test_long_segment_mostly_off_road_blocked(self):
+        # 长直线段大半不在真路上就判不可走 (横切广场的大斜线)
+        g = _grid("rpppppppppp",
+                  "rpppppppppp",
+                  "rrrrrrrrrrp",
+                  "ppppppppppr",
+                  "ppppppppppr",
+                  "ppppppppppr",
+                  "rrrrrrrrrrr")
+        # (0,0)->(9,2) 的直线切广场角: 10 格里只有一半是路, 必须挡住
+        assert _segment_crosses_blocked(g, 0, 0, 9, 2)
+        # 沿路走的段 (0,0)->(0,2) 全是路, 不挡
+        assert not _segment_crosses_blocked(g, 0, 0, 0, 2)
+        # 短段豁免: 5 格以内借道穿广场去接路, 不挡
+        assert not _segment_crosses_blocked(g, 0, 0, 2, 1)
+
+    def test_smoothed_line_mostly_on_road(self):
+        # 端到端: 蜿蜒路穿过广场海, A* + 平滑后画出来的红线大半落在真路格上
+        g = _grid("rpppppppppp",
+                  "rpppppppppp",
+                  "rrrrrrrrrrp",
+                  "ppppppppppr",
+                  "ppppppppppr",
+                  "ppppppppppr",
+                  "rrrrrrrrrrr")
+        raw = find_path_on_grid(g, (0, 0), (10, 6))
+        assert raw, "A* 应该找得到路"
+        wps = [{"x": x, "y": y} for x, y in raw]
+        out = smooth_path_on_grid(wps, g)
+        assert out[0] == {"x": 0, "y": 0} and out[-1] == {"x": 10, "y": 6}
+        # 画出来的红线 (各段 Bresenham 格子) 至少 60% 是真路格
+        total = on_road = 0
+        longest = 0
+        for a, b in zip(out, out[1:]):
+            cells = _straight_line_cells(a["x"], a["y"], b["x"], b["y"])
+            longest = max(longest, len(cells))
+            for (x, y) in cells:
+                total += 1
+                if g[y][x] in (CELL_ROAD, CELL_SIDEWALK):
+                    on_road += 1
+        assert total > 0 and on_road / total >= 0.6, (on_road, total)
+        # 没有横穿空地的大斜线: 最长一段不超过 12 格
+        assert longest <= 12, longest
