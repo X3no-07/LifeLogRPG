@@ -42,7 +42,9 @@ class CoordsMode(BaseMode):
             print(f"[coords] 解析失败: {e}")
             sys.exit(1)
         self.osm = OsmClient(timeout=int(self.config.get("bake", {}).get("osm_timeout_sec", 30)))
-        self.amap = AmapClient(api_key=self.config.get("amap", {}).get("api_key", ""))
+        amap_config = self.config.get("amap", {})
+        self.amap = AmapClient(api_key=amap_config.get("api_key", ""),
+                               timeout=amap_config.get("timeout_sec", 10))
         self.tile_radius_m = int(self.config.get("bake", {}).get("tile_radius_m", 800))
 
     def run(self) -> "LogPayload":
@@ -64,6 +66,7 @@ class CoordsMode(BaseMode):
         seg_durations: List[float] = []
         seg_modes: List[str] = []
 
+        self.report_progress("route")
         for i in range(len(self.coords) - 1):
             a = self.coords[i]          # GCJ-02: 给高德 route 用
             b = self.coords[i + 1]
@@ -132,6 +135,7 @@ class CoordsMode(BaseMode):
 
         parsed_osm = {"roads": [], "buildings": [], "water": [], "green": []}
         if self.osm.enabled():
+            self.report_progress("map")
             raw = self.osm.query_bbox(bbox)
             if raw:
                 parsed_osm = parse_overpass(raw)
@@ -142,6 +146,7 @@ class CoordsMode(BaseMode):
 
         # P0.3: 调高德 place_around 拉 POI
         if self.amap.enabled():
+            self.report_progress("nearby")
             # 切片中心是 WGS84, 高德 place_around 要 GCJ-02, 转回再传
             center_lng, center_lat = slice_info["center"]
             center_gcj = wgs84_to_gcj02(center_lng, center_lat)
@@ -167,6 +172,7 @@ class CoordsMode(BaseMode):
                 poi.grid_y = gy
             print(f"[coords] POI: {len(p.pois)} 个 (周边 {self.tile_radius_m}m)")
 
+        self.report_progress("build")
         # transit_marker 投影到 grid (越界 clamp 到边缘)
         for tm in p.transit_markers:
             sx, sy = lnglat_to_grid_cell(tm.start_lng, tm.start_lat, bbox,

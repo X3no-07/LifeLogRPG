@@ -1,27 +1,20 @@
 extends Node
 class_name UISystem
-# UISystem - 所有 UI 控件 (进度条, 速度, 状态, 对话框)
-#
-# 公开节点 (其他模块可读):
-#   progress_bar: ProgressBar
-#   speed_label: Label
-#   status_label: Label
-#   dialog_label: Label
-#
-# 用法:
-#   var ui = UISystem.new()
-#   ui.setup(self)            # add_child 到 self (Main)
-#   ui.update_progress(t, total)
-#   ui.update_speed(is_playing, speed, t, total)
-#   ui.update_status(title, mood)
-#   ui.update_dialog(speaker, text)
-#   ui.reset_dialog()
+
+signal play_pause_requested
+signal replay_requested
+signal scrub_started
+signal seek_requested(time: float)
+signal scrub_ended
 
 var ui_layer: CanvasLayer
-var progress_bar: ProgressBar
-var speed_label: Label
 var status_label: Label
 var dialog_label: Label
+var timeline: HSlider
+var _play_pause: Button
+var _replay: Button
+var _time_label: Label
+var _speed_label: Label
 var _destination_panel: PanelContainer
 var _destination_status: Label
 var _destination_name: Label
@@ -42,28 +35,84 @@ func setup(parent: Node) -> void:
     status_label.text = "Life Log RPG"
     vbox.add_child(status_label)
 
-    progress_bar = ProgressBar.new()
-    progress_bar.min_value = 0.0
-    progress_bar.max_value = 1.0
-    progress_bar.value = 0.0
-    progress_bar.custom_minimum_size = Vector2(360, 16)
-    progress_bar.show_percentage = false
-    progress_bar.mouse_filter = Control.MOUSE_FILTER_STOP
-    vbox.add_child(progress_bar)
-
-    speed_label = Label.new()
-    speed_label.text = "Speed: 1.0x  (SPACE pause, UP/DOWN speed)"
-    vbox.add_child(speed_label)
-
     dialog_label = Label.new()
     dialog_label.text = ""
     dialog_label.add_theme_color_override("font_color", Color.WHITE)
     dialog_label.add_theme_color_override("font_outline_color", Color.BLACK)
     dialog_label.add_theme_constant_override("outline_size", 4)
-    dialog_label.position = Vector2(16, 640)
     dialog_label.add_theme_font_size_override("font_size", 18)
     ui_layer.add_child(dialog_label)
+    dialog_label.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
+    dialog_label.offset_left = 16
+    dialog_label.offset_top = -124
+    _setup_playback_controls()
     _setup_destination_panel()
+
+
+func _setup_playback_controls() -> void:
+    var panel := PanelContainer.new()
+    panel.name = "PlaybackControls"
+    panel.z_index = 102
+    ui_layer.add_child(panel)
+    panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
+    panel.offset_left = -380
+    panel.offset_right = 380
+    panel.offset_top = -85
+    panel.offset_bottom = -34
+    var style := StyleBoxFlat.new()
+    style.bg_color = Color("#15262e")
+    style.border_color = Color("#36515b")
+    style.set_border_width_all(1)
+    style.set_corner_radius_all(6)
+    style.content_margin_left = 12
+    style.content_margin_right = 12
+    style.content_margin_top = 6
+    style.content_margin_bottom = 6
+    panel.add_theme_stylebox_override("panel", style)
+
+    var controls := HBoxContainer.new()
+    controls.add_theme_constant_override("separation", 12)
+    panel.add_child(controls)
+    _play_pause = Button.new()
+    _play_pause.name = "PlayPause"
+    _play_pause.text = "播放"
+    _play_pause.tooltip_text = "播放或暂停（空格）"
+    _play_pause.custom_minimum_size = Vector2(58, 32)
+    _play_pause.pressed.connect(func() -> void: play_pause_requested.emit())
+    controls.add_child(_play_pause)
+
+    _replay = Button.new()
+    _replay.name = "Replay"
+    _replay.text = "重播"
+    _replay.tooltip_text = "从开头播放（R）"
+    _replay.custom_minimum_size = Vector2(58, 32)
+    _replay.pressed.connect(func() -> void: replay_requested.emit())
+    controls.add_child(_replay)
+
+    timeline = HSlider.new()
+    timeline.name = "Timeline"
+    timeline.tooltip_text = "点击或拖动以跳转回放"
+    timeline.custom_minimum_size.x = 180
+    timeline.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    timeline.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+    timeline.step = 0.01
+    timeline.scrollable = false
+    timeline.drag_started.connect(func() -> void: scrub_started.emit())
+    timeline.value_changed.connect(func(time: float) -> void: seek_requested.emit(time))
+    timeline.drag_ended.connect(func(_changed: bool) -> void: scrub_ended.emit())
+    controls.add_child(timeline)
+
+    _time_label = Label.new()
+    _time_label.custom_minimum_size.x = 144
+    _time_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+    controls.add_child(_time_label)
+    _speed_label = Label.new()
+    _speed_label.custom_minimum_size.x = 52
+    _speed_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+    _speed_label.tooltip_text = "↑ 加速 / ↓ 减速"
+    _speed_label.mouse_filter = Control.MOUSE_FILTER_STOP
+    controls.add_child(_speed_label)
+    update_playback(0.0, 0.0, false, 1.0)
 
 
 func show_map_attribution() -> void:
@@ -80,6 +129,19 @@ func show_map_attribution() -> void:
     credit.offset_right = -16
     credit.offset_top = -28
     credit.offset_bottom = -9
+
+
+func add_return_button(go_back: Callable) -> void:
+    var button := Button.new()
+    button.text = "返回首页  Esc"
+    button.focus_mode = Control.FOCUS_NONE
+    button.pressed.connect(go_back)
+    ui_layer.add_child(button)
+    button.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
+    button.offset_left = -66
+    button.offset_right = 66
+    button.offset_top = 16
+    button.offset_bottom = 48
 
 
 func _setup_destination_panel() -> void:
@@ -139,16 +201,21 @@ func update_destination(stop: Dictionary, arrived: bool, is_final: bool) -> void
     _destination_panel.show()
 
 
-func update_progress(current_time: float, total_duration: float) -> void:
-    if progress_bar:
-        progress_bar.max_value = max(total_duration, 1.0)
-        progress_bar.value = current_time
+func update_playback(current_time: float, total_duration: float, is_playing: bool, speed: float) -> void:
+    if timeline.max_value != total_duration:
+        timeline.max_value = total_duration
+    timeline.set_value_no_signal(current_time)
+    timeline.editable = total_duration > 0.0
+    _play_pause.disabled = total_duration <= 0.0 or current_time >= total_duration
+    _play_pause.text = "暂停" if is_playing else "播放"
+    _replay.disabled = total_duration <= 0.0
+    _time_label.text = "%s / %s" % [_timestamp(current_time), _timestamp(total_duration)]
+    _speed_label.text = "×%.2f" % speed
 
 
-func update_speed(is_playing: bool, speed: float, current_time: float, total_duration: float) -> void:
-    if speed_label:
-        var state := "▶" if is_playing else "⏸"
-        speed_label.text = "%s  Speed: %.2fx  Time: %.1f / %.1fs" % [state, speed, current_time, total_duration]
+func _timestamp(time: float) -> String:
+    var tenths := int(maxf(0.0, time) * 10.0)
+    return "%d:%02d.%d" % [tenths / 600, (tenths / 10) % 60, tenths % 10]
 
 
 func update_status(title: String, mood: String) -> void:

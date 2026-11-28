@@ -1,8 +1,8 @@
 """Text 模式: 自然语言日志 -> LLM 拆地点 -> 高德 POI + 路径 -> 真实地图
 
 Pipeline:
-  1. LLM 提取地点 (fallback 正则)
-  2. 高德 place_text 搜 POI (城市限定, fallback geocode)
+  1. 提取原文地点，优先识别明确的「从…到…」
+  2. 在指定城市确认 POI，完整门牌可用地理编码
   3. 按距离 + 关键词启发式决定 transport
   4. 高德 route 拿 polyline
   5. 切片: path bbox + 800m 半径
@@ -13,13 +13,14 @@ Pipeline:
 """
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.gridifier import (
     polyline_to_points, build_grid_from_waypoints,
     approx_distance_km, osm_to_grid, densify_and_snap_route,
     route_along_roads, apply_path_overlay, carve_route_passages,
-    smooth_path_on_grid,
+    smooth_path_on_grid, project_walking_track,
 )
 from ..core.gcj02 import gcj02_to_wgs84, wgs84_to_gcj02, gcj02_to_wgs84_points
 from ..core.tiling import slice_around_path, lnglat_to_grid_cell
@@ -55,6 +56,10 @@ POI_CATEGORY = {
 }
 
 
+class PlaceResolutionError(Exception):
+    """日记里的地点无法唯一定位。"""
+
+
 class TextMode(BaseMode):
     def __init__(self, name: str, text: str, config: Optional[Dict[str, Any]] = None):
         super().__init__(name, config)
@@ -68,25 +73,31 @@ class TextMode(BaseMode):
                 api_key=_llm_cfg.get("api_key", ""),
                 base_url=_llm_cfg.get("base_url", "https://api.deepseek.com/v1"),
                 model=_llm_cfg.get("text_model", "deepseek-chat"),
+                timeout=_llm_cfg.get("timeout_sec", 30),
                 provider="deepseek",
             )
         else:
+            _llm_cfg = self.config.get("minimax", {})
             self.llm = LLMClient(
-                api_key=self.config.get("minimax", {}).get("api_key", ""),
-                group_id=self.config.get("minimax", {}).get("group_id", ""),
-                base_url=self.config.get("minimax", {}).get("base_url", "https://api.minimaxi.com/v1"),
-                model=self.config.get("minimax", {}).get("text_model", "MiniMax-M3.1-Flash"),
+                api_key=_llm_cfg.get("api_key", ""),
+                group_id=_llm_cfg.get("group_id", ""),
+                base_url=_llm_cfg.get("base_url", "https://api.minimaxi.com/v1"),
+                model=_llm_cfg.get("text_model", "MiniMax-M3.1-Flash"),
+                timeout=_llm_cfg.get("timeout_sec", 30),
                 provider="minimax",
             )
+        amap_config = self.config.get("amap", {})
         self.amap = AmapClient(
-            api_key=self.config.get("amap", {}).get("api_key", ""),
-            base_url=self.config.get("amap", {}).get("base_url", "https://restapi.amap.com/v3"),
+            api_key=amap_config.get("api_key", ""),
+            base_url=amap_config.get("base_url", "https://restapi.amap.com/v3"),
+            timeout=amap_config.get("timeout_sec", 10),
         )
-        self.osm = OsmClient(
-            timeout=int(self.config.get("bake", {}).get("osm_timeout_sec", 30)),
-        )
-        self.default_city = self.config.get("bake", {}).get("default_city", "北京")
-        self.tile_radius_m = int(self.config.get("bake", {}).get("tile_radius_m", 800))
+        bake_config = self.config.get("bake", {})
+        self.osm = OsmClient(timeout=int(bake_config.get("osm_timeout_sec", 30)))
+        self.default_city = bake_config.get("default_city", "北京")
+        self.tile_radius_m = int(bake_config.get("tile_radius_m", 800))
+        self.fuzzy_candidate_limit = max(0, int(bake_config.get("fuzzy_candidate_limit", 80)))
+        self.selected_places: List[Dict[str, Any]] = []
 
     def run(self) -> "LogPayload":
         p = self.payload
@@ -94,7 +105,7 @@ class TextMode(BaseMode):
         p.meta.raw_text = self.text
 
         # 1) 提取地点
-        places = self._extract_places()
+        places = [place["name"] for place in self.selected_places] if self.selected_places else self._extract_places()
         if len(places) < 2:
             print(f"[text] 地点数 {len(places)} < 2, 失败: {places}")
             sys.exit(2)
@@ -104,7 +115,8 @@ class TextMode(BaseMode):
         if not self.amap.enabled():
             print("[text] 高德 Key 缺失, 无法 geocode。回 --mock 或 --coords 模式。")
             sys.exit(3)
-        geo_results = self._geocode_all(places)
+        self.report_progress("lookup")
+        geo_results = self.selected_places or self._geocode_all(places)
         if len(geo_results) < 2:
             print(f"[text] geocode 成功数 {len(geo_results)} < 2, 失败")
             sys.exit(4)
@@ -131,6 +143,7 @@ class TextMode(BaseMode):
         first_walk_i: Optional[int] = None  # 第一段步行 / 骑行段的起点下标
         last_walk_j: Optional[int] = None   # 最后一段步行 / 骑行段的段下标
 
+        self.report_progress("route")
         for i in range(len(coords) - 1):
             approx_km = approx_distance_km(coords[i], coords[i + 1])
             mode = self._pick_transport(approx_km, has_subway, has_drive, has_bike)
@@ -218,9 +231,23 @@ class TextMode(BaseMode):
               f"transit_markers={len(p.transit_markers)})")
         print(f"[text]   bbox: ({bbox[0]:.5f}, {bbox[1]:.5f}) -> ({bbox[2]:.5f}, {bbox[3]:.5f})")
 
+        center_gcj = wgs84_to_gcj02(*slice_info["center"])
+        poi_types = ("110000", "050000", "060000", "080000")
+        place_names = [place["name"] for place in geo_results]
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            map_request = pool.submit(self.osm.query_bbox, bbox) if self.osm.enabled() else None
+            nearby_request = pool.submit(self._nearby_pois, center_gcj, poi_types)
+            story_request = pool.submit(self.llm.generate_meta, self.text, place_names)
+            self.report_progress("map")
+            raw = map_request.result() if map_request else None
+            self.report_progress("nearby")
+            nearby_pois = nearby_request.result()
+            if not story_request.done():
+                self.report_progress("story")
+            llm_meta = story_request.result()
+
         parsed_osm: Dict[str, List[Dict[str, Any]]] = {"roads": [], "buildings": [], "water": [], "green": []}
         if self.osm.enabled():
-            raw = self.osm.query_bbox(bbox)
             if raw:
                 parsed_osm = parse_overpass(raw)
                 print(f"[text] OSM: {len(parsed_osm['roads'])} roads, "
@@ -234,14 +261,7 @@ class TextMode(BaseMode):
 
         # 6.5) 调高德 place_around 拉 POI (中心点 + radius_m)
         if self.amap.enabled():
-            # 切片中心是 WGS84, 高德 place_around 要 GCJ-02, 转回再传
-            center_lng, center_lat = slice_info["center"]
-            center_gcj = wgs84_to_gcj02(center_lng, center_lat)
-            for types_filter, label in [("110000", "scenic"), ("050000", "food"),
-                                          ("060000", "shop"), ("080000", "life")]:
-                pois = self.amap.place_around(center_gcj,
-                                              radius=self.tile_radius_m,
-                                              types=types_filter)
+            for pois in nearby_pois:
                 for poi in pois[:5]:  # 每类最多 5 个
                     cat_main = poi["type"].split(";")[0] if poi["type"] else "其他"
                     cat = POI_CATEGORY.get(cat_main, "other")
@@ -264,6 +284,7 @@ class TextMode(BaseMode):
             print(f"[text] POI: {len(p.pois)} 个 (周边 {self.tile_radius_m}m)")
 
         # 7) 网格化
+        self.report_progress("build")
         # P0.4: path 投影只用 walking_pts (避免 transit 端点把 bbox 撑大)
         if not walking_pts and not all_waypoints_px:
             print("[text] 无有效路径点")
@@ -286,27 +307,29 @@ class TextMode(BaseMode):
         # (锚点吸附 + 逐段寻路, 局部吸附修不好的偏 25 格的路线也能回来),
         # 最后把路线叠到网格上。没 OSM 数据时回退到加密 + 局部吸附。
         path_source = walking_pts if walking_pts else all_waypoints_px
+        grid_size = (p.map.width, p.map.height)
+        follow_amap = all(
+            mode == "walking" and route and route.get("polyline")
+            for mode, route in zip(seg_modes, seg_routes)
+        ) and len(walking_pts) >= 2
+        if follow_amap:
+            path_waypoints_grid = project_walking_track(path_source, bbox, grid_size, p.map.tile_size)
 
         if parsed_osm["roads"] or parsed_osm["buildings"]:
             # 用 OSM 真实数据 (P1.2: 多了 building_heights)
             grid, building_heights, osm_debug = osm_to_grid(
                 parsed_osm, bbox, (p.map.width, p.map.height),
             )
-            path_waypoints_grid = route_along_roads(
-                path_source, grid, bbox, (p.map.width, p.map.height),
-                osm_roads=parsed_osm.get("roads", []),
-                osm_water=parsed_osm.get("water", []))
-            # Bug 1: A* 出来的是逐格点列 (点距 1-2 格 = 楼梯/锯齿), 视线法
-            # 平滑后再刻通道/叠路, 直线段穿楼/水时保留拐点、不进楼不进水。
-            n_raw = len(path_waypoints_grid)
-            path_waypoints_grid = smooth_path_on_grid(path_waypoints_grid, grid)
-            print(f"[text] Path 平滑(视线法): {n_raw} -> {len(path_waypoints_grid)} 点")
-            # 门洞/桥处短暂穿墙的格子刻成路 (真实走道, 只是被楼盖住了)
-            n_carved = carve_route_passages(grid, path_waypoints_grid, building_heights)
-            if n_carved:
-                print(f"[text] 路线刻通道: {n_carved} 格 (门洞/桥)")
-            apply_path_overlay(grid, path_waypoints_grid)
-            print(f"[text] Path 投影(沿路网寻路): {len(path_source)} -> {len(path_waypoints_grid)} grid points")
+            if not follow_amap:
+                path_waypoints_grid = route_along_roads(
+                    path_source, grid, bbox, grid_size,
+                    osm_roads=parsed_osm.get("roads", []),
+                    osm_water=parsed_osm.get("water", []))
+                path_waypoints_grid = smooth_path_on_grid(path_waypoints_grid, grid)
+                carve_route_passages(grid, path_waypoints_grid, building_heights)
+                apply_path_overlay(grid, path_waypoints_grid)
+            print(f"[text] Path 投影 ({'高德步行' if follow_amap else '沿路网寻路'}): "
+                  f"{len(path_source)} -> {len(path_waypoints_grid)} grid points")
             p.map.grid = grid
             p.map.building_heights = building_heights
             n_with_levels = sum(1 for row in building_heights for v in row if v > 0)
@@ -346,14 +369,12 @@ class TextMode(BaseMode):
                 print(f"[text]   分类: {cats}")
         else:
             # fallback: 没 OSM 数据, 加密 + 局部吸附 (无路网可寻)
-            path_waypoints_grid = densify_and_snap_route(
+            fallback_grid_path = densify_and_snap_route(
                 path_source, [], bbox, (p.map.width, p.map.height))
-            print(f"[text] Path 投影(贴路): {len(path_source)} -> {len(path_waypoints_grid)} grid points")
-            p.map.grid = build_grid_from_waypoints(path_waypoints_grid, p.map.width, p.map.height)
+            p.map.grid = build_grid_from_waypoints(fallback_grid_path, p.map.width, p.map.height)
             # Bug 1: 同 OSM 分支, 逐格点列视线法平滑 (穿楼/水保留拐点)
-            n_raw = len(path_waypoints_grid)
-            path_waypoints_grid = smooth_path_on_grid(path_waypoints_grid, p.map.grid)
-            print(f"[text] Path 平滑(视线法): {n_raw} -> {len(path_waypoints_grid)} 点")
+            if not follow_amap:
+                path_waypoints_grid = smooth_path_on_grid(fallback_grid_path, p.map.grid)
 
         # 8) 组装 waypoint + meta
         # path 只含步行/骑行点, 总时长 = walking 段时长。
@@ -389,7 +410,8 @@ class TextMode(BaseMode):
         if last_walk_j is not None and first_walk_i is not None:
             playable_stops = slice(first_walk_i, last_walk_j + 2)
             p.stops = build_stops(p, coords_wgs[playable_stops], bbox, parsed_osm,
-                                  [place["name"] for place in geo_results[playable_stops]])
+                                  [place["name"] for place in geo_results[playable_stops]],
+                                  confirmed_finish=follow_amap)
         else:
             p.stops = build_stops(p, coords_wgs, bbox, parsed_osm,
                                   [place["name"] for place in geo_results])
@@ -398,8 +420,6 @@ class TextMode(BaseMode):
               f"transit={transit_total:.0f}s 未计入 path/总时长, total={cum_time:.0f}s)")
 
         # 9) LLM 生成 meta + dialogs
-        place_names = [g["name"] for g in geo_results]
-        llm_meta = self.llm.generate_meta(self.text, place_names)
         p.meta.weather = llm_meta.get("weather", "unknown")
         p.meta.mood = llm_meta.get("mood", "calm")
         p.meta.bgm = llm_meta.get("bgm", "")
@@ -440,46 +460,50 @@ class TextMode(BaseMode):
     # ------------------------------------------------------------------
     #  内部方法
     # ------------------------------------------------------------------
+    def _nearby_pois(self, center: Tuple[float, float], categories: Tuple[str, ...]) -> list:
+        if not self.amap.enabled():
+            return []
+        return [
+            self.amap.place_around(center, radius=self.tile_radius_m, types=category)
+            for category in categories
+        ]
+
     def _extract_places(self) -> List[str]:
-        """提取地点
-        优先级: LLM > 高德 fuzzy (不再用正则 fallback)
-        1) LLM extract_places (1-shot prompt, max_tokens 1000)
-        2) 高德 fuzzy: 拆句, 每句调 place_text 验证, 匹配的保留
-        都不行直接返回 [], 让上层 sys.exit(2) 失败
-        """
-        # 1) LLM
-        places = self.llm.extract_places(self.text)
+        """明确的两点路线优先，普通日记只采用原文中出现的地名。"""
+        self.report_progress("extract")
+        direct = re.fullmatch(
+            r"[^\s从，。！？；、,!?;]{0,16}从([^，。！？；、,!?;\r\n]+?)"
+            r"(?:步行|坐公交|坐地铁|开车|打车|骑车|走|出发)?(?:前往|到达|到|去)"
+            r"([^，。！？；、,.!?;\r\n]+)[。！？.!?]?",
+            self.text.strip(),
+        )
+        if direct and all(part.strip() for part in direct.groups()) and not re.search(
+            r"然后|接着|途经|路过|再去|之后|以后", self.text
+        ):
+            return [part.strip() for part in direct.groups()]
+
+        places = [
+            name.strip() for name in self.llm.extract_places(self.text)
+            if isinstance(name, str) and name.strip() and name.strip() in self.text
+        ]
         if places and len(places) >= 2:
             return places
-        if places:
-            print(f"[text] LLM 只回 {len(places)} 个, 尝试 fuzzy 补")
-        # 2) 高德 fuzzy: 拆句 + place_text 验证
-        fuzzy = self._fuzzy_extract_via_amap()
-        if fuzzy and len(fuzzy) >= 2:
-            return fuzzy
-        if places:
-            return places
-        if fuzzy:
-            return fuzzy
-        # 都不行: 返回空, 上层 sys.exit(2) 失败
-        print("[text] LLM + fuzzy 都不行, 失败 (不再用正则)")
-        return []
+        return self._fuzzy_extract_via_amap()
 
     def _fuzzy_extract_via_amap(self) -> List[str]:
         """调高德 place_text 把日志里可能的地点片段查一遍, 匹配上的保留。
         精度规则 (通用, 不针对某条路线):
         - 候选按长度从长到短查, 真地名 (3-8 字) 先于 2 字碎片;
-        - 接受条件: 3 字以上要求 POI 名等于候选或以候选开头
-          (防 "鑫花园" 错配成 "金鑫花园" 这类中间子串),
-          2 字只接受名字完全相等 (防 "市齐" 错配成公司名);
+        - 仅接受与候选完全匹配的 POI 名称；
         - 城市名本身不算地点 (防 "济宁" 变成 "济宁市" 占一个点);
         - 查完所有候选再按在日志里的出现顺序排, 不中途停。
         """
         if not self.amap.enabled():
             return []
-        candidates = self._extract_candidate_strings(self.text)
+        candidates = self._extract_candidate_strings(self.text)[:self.fuzzy_candidate_limit]
         if not candidates:
             return []
+        self.report_progress("lookup")
         print(f"[text] fuzzy: 尝试 {len(candidates)} 个候选")
         # real_name -> 首次在日志里的位置 (用于按路线顺序排)
         found: Dict[str, int] = {}
@@ -491,13 +515,8 @@ class TextMode(BaseMode):
             # 城市名本身不算地点
             if real_name == self.default_city or real_name == self.default_city + "市":
                 continue
-            # 接受条件: 长候选允许"开头匹配", 2 字只允许完全相等
-            if len(c) >= 3:
-                if not (real_name == c or real_name.startswith(c)):
-                    continue
-            else:
-                if real_name != c:
-                    continue
+            if real_name != c:
+                continue
             if real_name in found:
                 continue
             pos = self.text.find(real_name)
@@ -537,19 +556,47 @@ class TextMode(BaseMode):
     def _geocode_all(self, places: List[str]) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
         for name in places[:6]:
-            loc = self.amap.place_text(name, city=self.default_city)
-            if loc:
-                lng, lat, real_name = loc
-                results.append({"name": real_name, "lng": lng, "lat": lat})
-                print(f"[text]   {name} -> {real_name} ({lng:.4f}, {lat:.4f}) [{self.default_city}]")
+            query = self._local_place_name(name)
+            if not query:
+                raise PlaceResolutionError(f"「{name}」只有城市名，请补充具体地点。")
+            hits = self.amap.place_candidates(query, city=self.default_city)
+            query_identity = query.replace("(", "").replace(")", "")
+            branch = re.fullmatch(r"(.+?(?:广场|购物中心))\(?[^()]+店\)?", query)
+            if branch and not any(
+                self._local_place_name(hit[2]).replace("(", "").replace(")", "") == query_identity
+                for hit in hits
+            ):
+                hits += self.amap.place_candidates(branch[1], city=self.default_city)
+            exact = []
+            branches = []
+            for hit in dict.fromkeys(hits):
+                resolved = self._local_place_name(hit[2])
+                if resolved.replace("(", "").replace(")", "") == query_identity:
+                    exact.append(hit)
+                elif resolved.startswith(query + "(") and resolved.endswith(")"):
+                    branches.append(hit)
+            matches = exact or branches
+            if len(matches) > 1:
+                options = "、".join(dict.fromkeys(hit[2] for hit in matches[:3]))
+                raise PlaceResolutionError(f"「{name}」有多个匹配地点（{options}），请填写具体分店或使用经纬度。")
+            if matches:
+                lng, lat, resolved = matches[0]
+                results.append({"name": resolved, "lng": lng, "lat": lat})
                 continue
-            loc2 = self.amap.geocode(name, city=self.default_city)
-            if loc2:
-                results.append({"name": name, "lng": loc2[0], "lat": loc2[1]})
-                print(f"[text]   {name} -> ({loc2[0]:.4f}, {loc2[1]:.4f}) [geocode fallback]")
-                continue
-            print(f"[text]   {name} -> 失败, 跳过")
+            if re.search(r"\d+号$", query):
+                point = self.amap.geocode(query, city=self.default_city, require_house_number=True)
+                if point:
+                    results.append({"name": name, "lng": point[0], "lat": point[1]})
+                    continue
+            raise PlaceResolutionError(f"在「{self.default_city}」找不到与「{name}」匹配的地点。请核对正式名称、地址或高德 Key。")
         return results
+
+    def _local_place_name(self, name: str) -> str:
+        normalized = re.sub(r"\s+", "", name).translate(str.maketrans("（）", "()")).casefold()
+        city = self.default_city.strip().removesuffix("市").casefold()
+        if city:
+            normalized = normalized.removeprefix(city + "市") if normalized.startswith(city + "市") else normalized.removeprefix(city)
+        return normalized
 
     @staticmethod
     def _pick_transport(approx_km: float, has_subway: bool, has_drive: bool, has_bike: bool) -> str:

@@ -59,8 +59,8 @@ class MapData:
 @dataclass
 class Waypoint:
     """路径上的一点, 描述角色在 t 时刻应该在 (x, y) 网格坐标处"""
-    x: int = 0                     # grid 列
-    y: int = 0                     # grid 行
+    x: float = 0                   # grid 列，高德步行轨迹可保留小数
+    y: float = 0                   # grid 行
     t: float = 0.0                 # 时刻 (秒), 已缩放
     label: str = ""                # 地点名 / 步骤描述
     transport: str = "walking"     # walking/driving/transit/bicycling

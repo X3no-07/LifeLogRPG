@@ -12,7 +12,7 @@ config_version=5
 
 config/name="Life Log RPG"
 config/description="A pixel RPG that re-enacts your real-life journal entries as a GBA-style top-down stage play."
-run/main_scene="res://scenes/main.tscn"
+run/main_scene="res://scenes/launcher.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://assets/icon.svg"
 

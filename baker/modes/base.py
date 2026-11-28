@@ -1,7 +1,7 @@
 """Mode 抽象基类"""
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..core.schema import LogPayload, Meta, MapData, Waypoint, Dialog, Character
 from ..config import load_config, get_output_dir
@@ -14,9 +14,14 @@ class BaseMode(ABC):
         self.name = name
         self.config = config or load_config()
         self.payload = self._empty_payload()
+        self.progress_callback: Optional[Callable[[str], None]] = None
         # 火红渲染上下文 (text/coords 模式在 run() 末尾填):
         # {"bbox", "osm", "start_name", "end_name"}; 没填就不画图。
         self._render_ctx: Optional[Dict[str, Any]] = None
+
+    def report_progress(self, stage: str) -> None:
+        if self.progress_callback is not None:
+            self.progress_callback(stage)
 
     def _empty_payload(self) -> LogPayload:
         """构造一个空白 payload, 子类填充"""

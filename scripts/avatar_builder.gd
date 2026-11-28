@@ -15,7 +15,8 @@ class_name AvatarBuilder
 
 signal confirmed(avatar: Dictionary)
 
-const AVATAR_PATH := "res://saved_logs/avatar.json"
+const AVATAR_PATH := "user://avatar.json"
+const BUNDLED_AVATAR_PATH := "res://saved_logs/avatar.json"
 const PREVIEW_SCALE := 6
 const PlayerClass = preload("res://scripts/player.gd")
 
@@ -246,7 +247,7 @@ func _save_avatar(avatar: Dictionary) -> void:
 # =====================================================================
 
 static func load_avatar() -> Dictionary:
-    """从 saved_logs/avatar.json 读 avatar
+    """从用户目录或随附的 saved_logs/avatar.json 读 avatar
     - 文件不存在 → 返回 {} (空 dict, 表示"未捏脸", main.gd 据此显示捏脸 UI)
     - 文件存在但字段缺失 → 用 default 补齐
     - 解析失败 → 返回 {} (强制重新捏脸)
@@ -255,9 +256,10 @@ static func load_avatar() -> Dictionary:
         "hair": "spike", "skin": "medium", "shirt": "red",
         "pants": "blue", "accessory": "none",
     }
-    if not FileAccess.file_exists(AVATAR_PATH):
+    var path := AVATAR_PATH if FileAccess.file_exists(AVATAR_PATH) else BUNDLED_AVATAR_PATH
+    if not FileAccess.file_exists(path):
         return {}
-    var f := FileAccess.open(AVATAR_PATH, FileAccess.READ)
+    var f := FileAccess.open(path, FileAccess.READ)
     if f == null:
         return {}
     var json := JSON.new()

@@ -97,24 +97,10 @@ var _stop_pin_center: Polygon2D
 # =====================================================================
 
 func _init_tile_set() -> void:
-    """从 tile_sheet.png 加载, 运行时创建 TileSet
-    用 FileAccess + Image.load_png_from_buffer (instance method), 跳过 .import 系统
-    """
-    if not FileAccess.file_exists(TILE_SHEET_PATH):
-        push_error("WorldBuilder: tile sheet not found: " + TILE_SHEET_PATH)
+    var tex := _load_atlas_texture(TILE_SHEET_PATH)
+    if tex == null:
+        push_error("WorldBuilder: tile sheet cannot be loaded: " + TILE_SHEET_PATH)
         return
-    var f := FileAccess.open(TILE_SHEET_PATH, FileAccess.READ)
-    if f == null:
-        push_error("WorldBuilder: cannot open " + TILE_SHEET_PATH)
-        return
-    var bytes := f.get_buffer(f.get_length())
-    f.close()
-    var img := Image.new()
-    var err := img.load_png_from_buffer(bytes)
-    if err != OK:
-        push_error("WorldBuilder: cannot decode PNG, err=%d" % err)
-        return
-    var tex := ImageTexture.create_from_image(img)
 
     tile_set = TileSet.new()
     tile_set.tile_size = Vector2i(TILE_SIZE_PX, TILE_SIZE_PX)
@@ -142,24 +128,10 @@ func _cell_to_atlas(cell_type: int) -> Vector2i:
 # =====================================================================
 
 func _init_interior_set() -> void:
-    """加载 interior_sheet.png, 运行时建独立 TileSet (用 16x16 source)
-    跟地形 TileSet 区分, source id 用 1
-    """
-    if not FileAccess.file_exists(INTERIOR_SHEET_PATH):
-        push_warning("WorldBuilder: interior sheet not found: " + INTERIOR_SHEET_PATH)
+    var tex := _load_atlas_texture(INTERIOR_SHEET_PATH)
+    if tex == null:
+        push_warning("WorldBuilder: interior sheet cannot be loaded: " + INTERIOR_SHEET_PATH)
         return
-    var f := FileAccess.open(INTERIOR_SHEET_PATH, FileAccess.READ)
-    if f == null:
-        push_warning("WorldBuilder: cannot open " + INTERIOR_SHEET_PATH)
-        return
-    var bytes := f.get_buffer(f.get_length())
-    f.close()
-    var img := Image.new()
-    var err := img.load_png_from_buffer(bytes)
-    if err != OK:
-        push_warning("WorldBuilder: cannot decode interior PNG, err=%d" % err)
-        return
-    var tex := ImageTexture.create_from_image(img)
 
     interior_set = TileSet.new()
     interior_set.tile_size = Vector2i(TILE_SIZE_PX, TILE_SIZE_PX)
@@ -174,6 +146,19 @@ func _init_interior_set() -> void:
         atlas.create_tile(Vector2i(col, row))
     interior_set.add_source(atlas)
     print("[WorldBuilder] P1.3 Interior TileSet: 13 tiles from %s" % INTERIOR_SHEET_PATH)
+
+
+func _load_atlas_texture(path: String) -> Texture2D:
+    if ResourceLoader.exists(path, "Texture2D"):
+        var imported := load(path) as Texture2D
+        if imported:
+            return imported
+    # A fresh source checkout can also replay before a texture import.
+    if FileAccess.file_exists(path):
+        var image := Image.new()
+        if image.load_png_from_buffer(FileAccess.get_file_as_bytes(path)) == OK:
+            return ImageTexture.create_from_image(image)
+    return null
 
 
 # =====================================================================
@@ -376,15 +361,13 @@ func _draw_path(waypoints: Array) -> void:
     line.width = 2.0
     line.default_color = PALETTE["path"]
     for wp in waypoints:
-        line.add_point(Vector2(int(wp.get("x", 0)) * tile_size + tile_size / 2.0,
-                               int(wp.get("y", 0)) * tile_size + tile_size / 2.0))
+        line.add_point((Vector2(float(wp.get("x", 0)), float(wp.get("y", 0))) + Vector2(0.5, 0.5)) * tile_size)
     path_overlay.add_child(line)
     for wp in waypoints:
         var dot := ColorRect.new()
         dot.color = Color.WHITE
         dot.size = Vector2(4, 4)
-        dot.position = Vector2(int(wp.get("x", 0)) * tile_size + tile_size / 2.0 - 2,
-                               int(wp.get("y", 0)) * tile_size + tile_size / 2.0 - 2)
+        dot.position = (Vector2(float(wp.get("x", 0)), float(wp.get("y", 0))) + Vector2(0.5, 0.5)) * tile_size - dot.size * 0.5
         path_overlay.add_child(dot)
 
 

@@ -134,7 +134,8 @@ def _path_time(path: Sequence[Waypoint], point: Point, after: float) -> Tuple[fl
 
 
 def build_stops(payload: LogPayload, points: Sequence[Point], bounds: Bounds,
-                osm: Dict[str, List[Dict[str, Any]]], names: Optional[Sequence[str]] = None) -> List[Stop]:
+                osm: Dict[str, List[Dict[str, Any]]], names: Optional[Sequence[str]] = None, *,
+                confirmed_finish: bool = False) -> List[Stop]:
     """输出省略出发点、按播放时间排序的停靠点。"""
     if not payload.path:
         return []
@@ -158,7 +159,7 @@ def build_stops(payload: LogPayload, points: Sequence[Point], bounds: Bounds,
             time, distance, approach_grid = _path_time(path, path_point, last_time)
         # The walking route may exclude a driving segment from text logs. Avoid
         # assigning a far-away stop to the nearest playable scene.
-        if time <= last_time or distance > 16:
+        if time <= last_time or (distance > 16 and not (confirmed_finish and is_final)):
             continue
         approach = (west + (approach_grid[0] + 0.5) / size[0] * (east - west),
                     north - (approach_grid[1] + 0.5) / size[1] * (north - south))

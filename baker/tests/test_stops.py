@@ -1,4 +1,5 @@
 from baker.clients.osm import parse_osm_api_xml, parse_overpass
+from baker.core.gridifier import project_walking_track
 from baker.core.schema import LogPayload, MapData, Waypoint
 from baker.core.stops import build_stops
 from baker.core.time_scale import apply_time_scale
@@ -78,3 +79,22 @@ def test_mismatched_containing_building_does_not_override_text_destination():
                         ["出发点", "另外一家店"])
     assert stop.name == "另外一家店"
     assert not stop.category and not stop.outline and not stop.entrance
+
+
+def test_confirmed_walking_destination_has_pin_without_an_osm_building():
+    payload = _payload((10, 70, 0), (50, 72, 45))
+    stop, = build_stops(
+        payload, [(116.401, 39.903), (116.405, 39.905)], BOUNDS, {},
+        ["小区北门", "万达广场"], confirmed_finish=True,
+    )
+    assert stop.name == "万达广场" and stop.t == 45
+    assert abs(stop.x - 49.5) < 0.001 and abs(stop.y - 49.5) < 0.001
+    assert not stop.outline and not stop.entrance
+
+
+def test_walking_track_keeps_geographic_corners_and_subcell_coordinates():
+    bounds = (0, 0, 1, 1)
+    route = [(0.25, 0.75), (0.25001, 0.74999), (0.25, 0.25), (0.75, 0.25)]
+    assert project_walking_track(route, bounds, (40, 40), 16) == [
+        {"x": 9.5, "y": 9.5}, {"x": 9.5, "y": 29.5}, {"x": 29.5, "y": 29.5},
+    ]

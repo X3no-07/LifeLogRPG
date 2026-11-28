@@ -8,6 +8,7 @@ API 文档: https://lbs.amap.com/api/webservice/guide/api/
 - route(origin, dest, mode) -> {distance, duration, polyline, steps} | None
   mode: walking / bicycling / driving / transit
 """
+import math
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,7 +44,8 @@ class AmapClient:
     # ------------------------------------------------------------------
     #  Geocode / Place Text
     # ------------------------------------------------------------------
-    def geocode(self, address: str, city: Optional[str] = None) -> Optional[Point]:
+    def geocode(self, address: str, city: Optional[str] = None, *,
+                require_house_number: bool = False) -> Optional[Point]:
         """地址 -> (lng, lat), 适合 "北京市东城区王府井大街" 这种完整地址"""
         if not self.enabled():
             return None
@@ -54,7 +56,13 @@ class AmapClient:
             r = self._requests.get(f"{self.base_url}/geocode/geo", params=params, timeout=self.timeout)
             data = r.json()
             if data.get("status") == "1" and data.get("geocodes"):
-                loc = data["geocodes"][0]["location"]
+                match = data["geocodes"][0]
+                if require_house_number and (
+                    match.get("level") != "门牌号"
+                    or not str(match.get("formatted_address", "")).endswith(address)
+                ):
+                    return None
+                loc = match["location"]
                 lng, lat = loc.split(",")
                 return (float(lng), float(lat))
         except Exception as e:
@@ -66,28 +74,89 @@ class AmapClient:
         """POI 关键字搜索 -> (lng, lat, name)
         比 geocode 更适合 POI 简称 (王府井/国贸等), 支持 city 限定避免全国同名
         """
+        hits = self.place_candidates(keywords, city, types, limit=1)
+        return hits[0] if hits else None
+
+    def place_candidates(self, keywords: str, city: str = "北京",
+                         types: Optional[str] = None, *,
+                         limit: int = 15) -> List[Tuple[float, float, str]]:
         if not self.enabled():
-            return None
+            return []
         params: Dict[str, Any] = {
             "key": self.api_key,
             "keywords": keywords,
             "city": city,
             "citylimit": "true",
             "output": "JSON",
-            "offset": 1,
+            "offset": limit,
         }
         if types:
             params["types"] = types
         try:
             r = self._requests.get(f"{self.base_url}/place/text", params=params, timeout=self.timeout)
             data = r.json()
+            hits = []
             if data.get("status") == "1" and data.get("pois"):
-                p = data["pois"][0]
-                lng, lat = p["location"].split(",")
-                return (float(lng), float(lat), p.get("name", keywords))
+                for poi in data["pois"]:
+                    try:
+                        lng, lat = map(float, poi.get("location", "").split(","))
+                    except (AttributeError, ValueError):
+                        continue
+                    if poi.get("name"):
+                        hits.append((lng, lat, poi["name"]))
+            return hits
         except Exception as e:
             self._log(f"place_text error: {e}")
-        return None
+        return []
+
+    def suggest_places(self, query: str, city: str) -> List[Dict[str, Any]]:
+        if not self.enabled():
+            raise OSError("地图服务未配置")
+        params = {"key": self.api_key, "keywords": query, "city": city,
+                  "citylimit": "true", "output": "JSON"}
+        choices = []
+        seen = set()
+        succeeded = False
+        for path, field, extra in (
+            ("assistant/inputtips", "tips", {"datatype": "all"}),
+            ("place/text", "pois", {"offset": 10}),
+        ):
+            try:
+                response = self._requests.get(f"{self.base_url}/{path}",
+                                              params={**params, **extra}, timeout=self.timeout)
+                data = response.json()
+            except (self._requests.exceptions.RequestException, ValueError):
+                continue
+            if data.get("status") != "1":
+                continue
+            succeeded = True
+            for item in data.get(field, []):
+                name = item.get("name")
+                location = item.get("location")
+                if not isinstance(name, str) or not name or not isinstance(location, str):
+                    continue
+                try:
+                    lng, lat = map(float, location.split(","))
+                except ValueError:
+                    continue
+                if not (math.isfinite(lng) and math.isfinite(lat)
+                        and -180 <= lng <= 180 and -90 <= lat <= 90):
+                    continue
+                identity = (name, lng, lat)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                address = " ".join(value for value in
+                                   (item.get("district") or item.get("adname"), item.get("address"))
+                                   if isinstance(value, str) and value)
+                choices.append({"name": name, "address": address, "lng": lng, "lat": lat})
+                if len(choices) == 5:
+                    return choices
+            if choices:
+                return choices
+        if not succeeded:
+            raise OSError("地图服务查询失败")
+        return choices
 
     def place_around(self, location: Tuple[float, float], radius: int = 500,
                      types: Optional[str] = None,

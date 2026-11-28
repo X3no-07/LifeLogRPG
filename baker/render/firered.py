@@ -193,12 +193,12 @@ def _norm_path(path):
     out = []
     for p in path or []:
         if isinstance(p, dict):
-            out.append((int(p["x"]), int(p["y"]),
+            out.append((float(p["x"]), float(p["y"]),
                         str(p.get("transport", "walking"))))
         elif isinstance(p, (tuple, list)):
-            out.append((int(p[0]), int(p[1]), "walking"))
+            out.append((float(p[0]), float(p[1]), "walking"))
         else:
-            out.append((int(getattr(p, "x")), int(getattr(p, "y")),
+            out.append((float(getattr(p, "x")), float(getattr(p, "y")),
                         str(getattr(p, "transport", "walking"))))
     return out
 

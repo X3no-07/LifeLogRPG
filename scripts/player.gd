@@ -65,9 +65,11 @@ func apply_avatar(avatar: Dictionary) -> void:
 func set_walk_state(heading: Vector2, moving: bool) -> void:
     if heading.length_squared() > 0.0001:
         if absf(heading.x) > absf(heading.y):
-            _direction = "right" if heading.x > 0 else "left"
+            if _direction in ["left", "right"] or absf(heading.x) > absf(heading.y) * 1.25:
+                _direction = "right" if heading.x > 0 else "left"
         else:
-            _direction = "down" if heading.y > 0 else "up"
+            if _direction in ["up", "down"] or absf(heading.y) > absf(heading.x) * 1.25:
+                _direction = "down" if heading.y > 0 else "up"
     _moving = moving
     _update_walk_animation()
 
@@ -93,7 +95,12 @@ func _update_walk_animation() -> void:
     var animation := ("walk_" if is_walking else "idle_") + _direction
     var needs_restart := is_walking and not _walk_sprite.is_playing()
     if _walk_sprite.sprite_frames.has_animation(animation) and (_walk_sprite.animation != animation or needs_restart):
+        var continuing := is_walking and String(_walk_sprite.animation).begins_with("walk_")
+        var previous_frame := _walk_sprite.frame
+        var previous_progress := _walk_sprite.frame_progress
         _walk_sprite.play(animation)
+        if continuing:
+            _walk_sprite.set_frame_and_progress(previous_frame, previous_progress)
 
 
 static func build_avatar_frames(avatar: Dictionary) -> SpriteFrames:

@@ -14,6 +14,7 @@ from . import __version__
 from .config import load_config
 from .core.time_scale import apply_time_scale
 from .modes import MockMode, CoordsMode, TextMode
+from .modes.text import PlaceResolutionError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,7 +55,11 @@ def main(argv: Optional[list] = None) -> int:
         print("[hint] 未指定模式, 默认用 --mock")
         mode = MockMode(args.name, config)
 
-    payload = mode.run()
+    try:
+        payload = mode.run()
+    except PlaceResolutionError as error:
+        print(f"[text] {error}", file=sys.stderr)
+        return 4
 
     # 后处理: 时间缩放 (直接改 payload 对象, 写到 meta)
     if args.target_duration > 0:

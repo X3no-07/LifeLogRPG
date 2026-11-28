@@ -298,6 +298,24 @@ def _is_closed_poly(nodes: List[Tuple[float, float]]) -> bool:
     return len(nodes) >= 3 and nodes[0] == nodes[-1]
 
 
+def project_walking_track(points, bbox, grid_size, tile_size):
+    """Project a navigation track without moving it onto another road network."""
+    projected = _project_floats(points, bbox, grid_size)
+    if not projected:
+        return []
+    track = [projected[0]]
+    for x, y in projected[1:-1]:
+        last_x, last_y = track[-1]
+        if (int(x * tile_size), int(y * tile_size)) != (
+            int(last_x * tile_size), int(last_y * tile_size)
+        ):
+            track.append((x, y))
+    if projected[-1] != track[-1]:
+        track.append(projected[-1])
+    # Waypoints use cell centers; the map projection measures from cell edges.
+    return [{"x": x - 0.5, "y": y - 0.5} for x, y in track]
+
+
 def _pil_poly(dr, pts: List[Tuple[float, float]], fill: int,
               line_width: int = 1) -> None:
     """PIL 画多边形: >=3 点填面, 2 点画线, 1 点画点。"""

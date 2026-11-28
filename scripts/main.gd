@@ -29,9 +29,12 @@ const AvatarBuilderClass = preload("res://scripts/avatar_builder.gd")
 const CONFIG_PATH := "res://config.json"
 const DEFAULT_LOG_PATH := "res://saved_logs/log_001.json"
 
+signal return_requested
+
 # 配置
 var config: Dictionary = {}
 var log_path: String = DEFAULT_LOG_PATH
+var launcher_managed := false
 
 # 模块 (preload 拿到 Script, 不写类型注解因为 GDScript 静态推断有限)
 var loader
@@ -51,6 +54,8 @@ var dialogs: Array = []
 var stops: Array[Dictionary] = []
 var _displayed_stop: int = -1
 var _displayed_arrived: bool = false
+var _started := false
+var _resume_after_scrub := false
 
 
 func _ready() -> void:
@@ -126,6 +131,8 @@ func _load_config() -> void:
 
 
 func _resolve_log_path() -> void:
+    if launcher_managed:
+        return
     for arg in OS.get_cmdline_args():
         if arg.begins_with("--log="):
             log_path = arg.substr(6)
@@ -160,8 +167,7 @@ func _build_modules() -> void:
     player.build(tile_size)
     if waypoints.size() > 0:
         var p0: Dictionary = waypoints[0]
-        player.position = Vector2(int(p0.get("x", 0)) * tile_size + tile_size / 2.0,
-                                  int(p0.get("y", 0)) * tile_size + tile_size / 2.0)
+        player.position = (Vector2(float(p0.get("x", 0)), float(p0.get("y", 0))) + Vector2(0.5, 0.5)) * tile_size
 
     # 相机: 直接跟随人物, 不用位置平滑
     # 平滑会让相机滞后人物 (滞后量 = 速度 / 平滑速度), 速度一变、拐弯、
@@ -179,7 +185,8 @@ func _build_modules() -> void:
     ui_sys = UISystemClass.new()
     add_child(ui_sys)
     ui_sys.setup(self)
-    ui_sys.progress_bar.max_value = max(loader.get_total_duration(), 1.0)
+    if launcher_managed:
+        ui_sys.add_return_button(func(): return_requested.emit())
 
     # Transport (需要 ui_layer 放 overlay)
     transport = TransportSystemClass.new()
@@ -222,17 +229,20 @@ func _build_modules() -> void:
 
 func _wire_signals() -> void:
     playback.time_changed.connect(_on_time_changed)
-    ui_sys.progress_bar.gui_input.connect(_seek_from_progress_bar)
+    ui_sys.play_pause_requested.connect(_toggle_play_pause)
+    ui_sys.replay_requested.connect(_replay)
+    ui_sys.scrub_started.connect(_begin_scrub)
+    ui_sys.seek_requested.connect(_seek)
+    ui_sys.scrub_ended.connect(_end_scrub)
 
 
 func _start() -> void:
-    playback.start()
-    _update_destination()
+    _started = true
+    if playback.total_duration > 0.0:
+        playback.start()
     ui_sys.update_status(loader.get_log_meta().get("title", "Log"),
                          loader.get_log_meta().get("mood", "calm"))
-    # 把天气状态显示到 UI
-    if weather:
-        ui_sys.speed_label.text += "  |  Weather: " + weather.get_current()
+    _refresh_playback_ui()
 
 
 # =====================================================================
@@ -248,8 +258,6 @@ func _process(delta: float) -> void:
     _update_player_position()
     _update_camera()
     _update_npc()
-    if playback.is_finished():
-        ui_sys.speed_label.text = "Playback finished. Press R to restart."
 
 
 func _on_time_changed(_t: float) -> void:
@@ -258,8 +266,7 @@ func _on_time_changed(_t: float) -> void:
 
 
 func _refresh_playback_ui() -> void:
-    ui_sys.update_progress(playback.current_time, playback.total_duration)
-    ui_sys.update_speed(playback.is_playing, playback.play_speed, playback.current_time, playback.total_duration)
+    ui_sys.update_playback(playback.current_time, playback.total_duration, playback.is_playing, playback.play_speed)
     _update_dialog()
     _update_destination()
 
@@ -301,27 +308,42 @@ func _update_player_position() -> void:
     var tb: float = float(b.get("t", ta + 1.0))
     var seg: float = max(tb - ta, 0.001)
     var ratio: float = clamp((t - ta) / seg, 0.0, 1.0)
-    var ax: float = int(a.get("x", 0)) * tile_size + tile_size / 2.0
-    var ay: float = int(a.get("y", 0)) * tile_size + tile_size / 2.0
-    var bx: float = int(b.get("x", 0)) * tile_size + tile_size / 2.0
-    var by: float = int(b.get("y", 0)) * tile_size + tile_size / 2.0
+    var ax: float = float(a.get("x", 0)) * tile_size + tile_size / 2.0
+    var ay: float = float(a.get("y", 0)) * tile_size + tile_size / 2.0
+    var bx: float = float(b.get("x", 0)) * tile_size + tile_size / 2.0
+    var by: float = float(b.get("y", 0)) * tile_size + tile_size / 2.0
     player.position = Vector2(lerp(ax, bx, ratio), lerp(ay, by, ratio))
     var heading := Vector2(bx - ax, by - ay)
     var moving: bool = (playback.is_playing and not transport.is_in_transition()
         and tb > ta and not heading.is_zero_approx())
+    if moving and player.get_current() == "walking":
+        # Densified routes often alternate short horizontal and vertical steps.
+        var behind: Dictionary = waypoints[_find_segment(maxf(t - 0.12, 0.0))]
+        var ahead: Dictionary = waypoints[_find_segment(minf(t + 0.12, playback.total_duration)) + 1]
+        var travel := Vector2(float(ahead["x"]) - float(behind["x"]), float(ahead["y"]) - float(behind["y"]))
+        if not travel.is_zero_approx():
+            heading = travel
     player.set_walk_state(heading, moving)
 
 
 func _find_segment(t: float) -> int:
-    for k in range(waypoints.size() - 1):
-        if t >= float(waypoints[k].get("t", 0)) and t <= float(waypoints[k + 1].get("t", 0)):
-            return k
-    return waypoints.size() - 2
+    var first := 0
+    var last := waypoints.size() - 2
+    while first < last:
+        var middle := (first + last) / 2
+        if t > float(waypoints[middle + 1].get("t", 0)):
+            first = middle + 1
+        else:
+            last = middle
+    return first
 
 
 func _update_camera() -> void:
     if camera and player:
-        camera.position = _clamp_camera_position(player.position)
+        var position_on_map := _clamp_camera_position(player.position)
+        var screen_scale := get_viewport().get_stretch_transform().get_scale() * camera.zoom
+        camera.position = (position_on_map * screen_scale).round() / screen_scale
+        camera.force_update_scroll()
 
 
 func _clamp_camera_position(pos: Vector2) -> Vector2:
@@ -402,9 +424,13 @@ func _update_dialog() -> void:
 # =====================================================================
 
 func _unhandled_input(event: InputEvent) -> void:
+    if launcher_managed and event.is_action_pressed("ui_cancel"):
+        return_requested.emit()
+        return
+    if not _started:
+        return
     if event.is_action_pressed("play_pause"):
-        playback.toggle()
-        _refresh_playback_ui()
+        _toggle_play_pause()
     elif event.is_action_pressed("play_speed_up"):
         playback.bump_speed_up()
         _refresh_playback_ui()
@@ -412,20 +438,48 @@ func _unhandled_input(event: InputEvent) -> void:
         playback.bump_speed_down()
         _refresh_playback_ui()
     elif event is InputEventKey and event.pressed and event.keycode == KEY_R:
-        playback.reset()
-        _seek(0.0)
+        _replay()
 
 
-func _seek_from_progress_bar(event: InputEvent) -> void:
-    if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-        var ratio: float = event.position.x / maxf(ui_sys.progress_bar.size.x, 1.0)
-        _seek(ratio * playback.total_duration)
-        ui_sys.progress_bar.accept_event()
+func _toggle_play_pause() -> void:
+    if playback.total_duration <= 0.0:
+        return
+    if playback.is_finished():
+        _replay()
+        return
+    playback.toggle()
+    _refresh_playback_ui()
+
+
+func _replay() -> void:
+    if playback.total_duration <= 0.0:
+        return
+    playback.reset()
+    _seek(0.0)
+    audio.play_music()
+
+
+func _begin_scrub() -> void:
+    _resume_after_scrub = playback.is_playing
+    playback.pause()
+    _refresh_playback_ui()
+
+
+func _end_scrub() -> void:
+    if _resume_after_scrub and not playback.is_finished():
+        playback.start()
+    _resume_after_scrub = false
+    _refresh_playback_ui()
 
 
 func _seek(time: float) -> void:
     playback.seek_to(time)
+    if playback.is_finished():
+        playback.pause()
     var mode := _get_transport_at(playback.current_time)
     if not mode.is_empty():
         transport.sync_current(mode)
     _refresh_playback_ui()
+    _update_player_position()
+    _update_camera()
+    _update_npc()
